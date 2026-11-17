@@ -14,16 +14,22 @@ Ranking results also report how many distinct books the top-10 lists cover, to s
 model only repeats the same popular books.
 """
 import argparse
+import json
 import os
 import time
+from datetime import datetime, timezone
 
+import numpy as np
 from pyspark.ml.evaluation import RegressionEvaluator
 from pyspark.ml.recommendation import ALS
 from pyspark.ml.tuning import ParamGridBuilder, TrainValidationSplit
 from pyspark.sql import functions as F
 
 from common.recs import explode_recs, split_train_test, top_k_unseen
-from common.settings import CHECKPOINT_DIR, MODEL_DIR, PARQUET_DIR, get_spark, save_report
+from common.settings import (
+    ALS_ALPHAS, ALS_EVAL_USERS, ALS_MAX_ITER, ALS_MIN_RATING, ALS_RANKS, ALS_REGS, ALS_SEED,
+    ALS_TEST_RATIO, CHECKPOINT_DIR, MODEL_DIR, PARQUET_DIR, get_spark, save_report,
+)
 
 K = 10
 
@@ -48,26 +54,36 @@ def ranking_metrics(recs, relevant, k):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--ranks", default="10,20")
-    parser.add_argument("--regs", default="0.05,0.1")
-    parser.add_argument("--max-iter", type=int, default=10)
-    parser.add_argument("--test-ratio", type=float, default=0.2)
-    parser.add_argument("--eval-users", type=int, default=5000, help="users sampled for Precision/Recall")
+    parser.add_argument("--ranks", default=ALS_RANKS)
+    parser.add_argument("--regs", default=ALS_REGS)
+    parser.add_argument("--max-iter", type=int, default=ALS_MAX_ITER)
+    parser.add_argument("--test-ratio", type=float, default=ALS_TEST_RATIO)
+    parser.add_argument("--eval-users", type=int, default=ALS_EVAL_USERS,
+                        help="users sampled for Precision/Recall")
     parser.add_argument("--candidates", type=int, default=200, help="ALS candidates per user before removing seen books")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=ALS_SEED)
+    parser.add_argument("--min-rating", type=int, default=ALS_MIN_RATING,
+                        help="minimum rating used as a positive ALS signal (configured via ALS_MIN_RATING)")
     parser.add_argument("--implicit", action="store_true",
                         help="implicit-feedback ALS (ranking-oriented): ratings become confidence weights; "
                              "tuned on validation Precision@10 instead of RMSE")
-    parser.add_argument("--alphas", default="1.0", help="--implicit: confidence scales to try (comma list)")
+    parser.add_argument("--alphas", default=ALS_ALPHAS,
+                        help="--implicit: confidence scales to try (comma list)")
     args = parser.parse_args()
 
     spark = get_spark("bookpulse-train")
     spark.sparkContext.setCheckpointDir(str(CHECKPOINT_DIR / "als"))
     started = time.time()
 
+    if not 1 <= args.min_rating <= 5:
+        parser.error("--min-rating must be between 1 and 5")
+    if not 0 < args.test_ratio < 1:
+        parser.error("--test-ratio must be between 0 and 1")
+    if args.max_iter < 1 or args.eval_users < 1:
+        parser.error("--max-iter and --eval-users must be positive")
     ratings = spark.read.parquet(str(PARQUET_DIR / "ratings"))
-    # CSV ratings: random seeded split (no timestamps); streamed ratings: always train (see split_train_test)
-    train, test, n_streamed = split_train_test(ratings, args.test_ratio, args.seed)
+    # Split only positive ratings; low ratings remain in `ratings` for seen-book filtering at serve time.
+    train, test, n_streamed = split_train_test(ratings, args.test_ratio, args.seed, args.min_rating)
     train, test = train.cache(), test.cache()
     evaluator = RegressionEvaluator(metricName="rmse", labelCol="rating", predictionCol="prediction")
 
@@ -82,8 +98,9 @@ def main():
     }
 
     # ALS is the Estimator; TrainValidationSplit picks rank/regParam on a validation slice of train
+    # Unconstrained implicit factors let the fixed-item user fold-in use the exact ALS normal equation.
     als = ALS(userCol="user_id", itemCol="book_id", ratingCol="rating", maxIter=args.max_iter,
-              coldStartStrategy="drop", nonnegative=True, seed=args.seed)
+              coldStartStrategy="drop", nonnegative=not args.implicit, seed=args.seed)
     ranks = [int(x) for x in args.ranks.split(",")]
     regs = [float(x) for x in args.regs.split(",")]
     fit_started = time.time()
@@ -93,13 +110,18 @@ def main():
         def implicit_als(rank, reg, alpha):
             return als.copy().setImplicitPrefs(True).setRank(rank).setRegParam(reg).setAlpha(alpha)
 
-        combos = [(r, g, a) for r in ranks for g in regs for a in (float(x) for x in args.alphas.split(","))]
+        combos = [(r, g, a) for r in ranks for g in regs
+                  for a in (float(x) for x in args.alphas.split(","))]
         tried = []
         if len(combos) > 1:
-            fit_part, val = (df.cache() for df in train.randomSplit([0.8, 0.2], seed=args.seed))
+            fit_part, val, _ = split_train_test(train, 0.2, args.seed + 1, args.min_rating)
+            fit_part, val = fit_part.cache(), val.cache()
             val_users = val.select("user_id").distinct().orderBy(F.rand(args.seed)).limit(args.eval_users).cache()
-            val_relevant = val.filter(F.col("rating") >= 4).join(val_users, "user_id").select("user_id", "book_id")
-            fit_seen = fit_part.select("user_id", "book_id")
+            val_relevant = val.filter(F.col("rating") >= args.min_rating).join(
+                val_users, "user_id").select("user_id", "book_id")
+            fit_seen = (ratings.join(test.select("user_id", "book_id"), ["user_id", "book_id"], "left_anti")
+                        .join(val.select("user_id", "book_id"), ["user_id", "book_id"], "left_anti")
+                        .select("user_id", "book_id"))
             for rank, reg, alpha in combos:
                 started_combo = time.time()
                 candidate = implicit_als(rank, reg, alpha).fit(fit_part)
@@ -131,8 +153,10 @@ def main():
 
     # Ranking metrics on a sample of test users
     eval_users = test.select("user_id").distinct().orderBy(F.rand(args.seed)).limit(args.eval_users).cache()
-    relevant = test.filter(F.col("rating") >= 4).join(eval_users, "user_id").select("user_id", "book_id")
-    seen = train.select("user_id", "book_id")
+    relevant = test.filter(F.col("rating") >= args.min_rating).join(
+        eval_users, "user_id").select("user_id", "book_id")
+    seen = ratings.join(test.select("user_id", "book_id"), ["user_id", "book_id"], "left_anti").select(
+        "user_id", "book_id")
     als_recs = top_k_unseen(explode_recs(model.recommendForUserSubset(eval_users, args.candidates)), seen, K)
     popular = (train.groupBy("book_id").agg(F.count("*").alias("score"))
                .orderBy(F.desc("score")).limit(args.candidates))
@@ -140,11 +164,45 @@ def main():
     ranking = {"als": ranking_metrics(als_recs, relevant, K),
                "baseline_popular": ranking_metrics(pop_recs, relevant, K)}
 
-    model_path = MODEL_DIR / ("als_implicit" if args.implicit else "als")
-    model.write().overwrite().save(str(model_path))
+    model_name = "als_implicit" if args.implicit else "als"
+    model_version = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    model_root = MODEL_DIR / model_name
+    version_path = model_root / "versions" / model_version
+    version_path.mkdir(parents=True, exist_ok=False)
+    model.write().save(str(version_path / "spark_model"))
+    manifest = {
+        "model_version": model_version,
+        "model_name": model_name,
+        "implicit": args.implicit,
+        "implicitPrefs": args.implicit,
+        "nonnegative": not args.implicit,
+        "min_rating": args.min_rating,
+        "rating_threshold": args.min_rating,
+        "alpha": best.get("alpha") if args.implicit else None,
+        "regParam": best["regParam"],
+        "rank": best["rank"],
+        "maxIter": args.max_iter,
+        "trained_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if args.implicit:
+        item_rows = model.itemFactors.orderBy("id").collect()
+        item_ids = np.asarray([row["id"] for row in item_rows], dtype=np.int32)
+        item_factors = np.asarray([row["features"] for row in item_rows], dtype=np.float32)
+        # Gramian dùng toàn bộ itemFactors cố định, tích lũy chính xác hơn ở float64.
+        gram = item_factors.astype(np.float64).T @ item_factors.astype(np.float64)
+        np.save(version_path / "item_ids.npy", item_ids)
+        np.save(version_path / "item_factors.npy", item_factors)
+        np.save(version_path / "YtY.npy", gram)
+    (version_path / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    pointer_path = model_root / "current.json"
+    temporary_pointer = pointer_path.with_suffix(".json.tmp")
+    temporary_pointer.write_text(json.dumps({"path": f"versions/{model_version}"}), encoding="utf-8")
+    temporary_pointer.replace(pointer_path)
     save_report("train_als_implicit" if args.implicit else "train_als", {
         "spark_master": os.getenv("SPARK_MASTER", "local[*]"),
         "implicit": args.implicit,
+        "min_rating": args.min_rating,
+        "model_version": model_version,
         "rows": {"train": train.count(), "test": test.count(), "streamed_in_train": n_streamed},
         "grid": tried,
         "best_params": best,
@@ -152,7 +210,10 @@ def main():
         "ranking_test": ranking,
         "fit_seconds": round(fit_seconds, 1),
         "total_seconds": round(time.time() - started, 1),
-        "model_path": str(model_path),
+        "model_path": str(version_path / "spark_model"),
+        "item_ids_path": str(version_path / "item_ids.npy") if args.implicit else None,
+        "item_factors_path": str(version_path / "item_factors.npy") if args.implicit else None,
+        "YtY_path": str(version_path / "YtY.npy") if args.implicit else None,
     })
     spark.stop()
 

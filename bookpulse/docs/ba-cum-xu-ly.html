@@ -268,8 +268,8 @@ html { scroll-behavior: smooth; }
 <!-- ============ STREAMING ============ -->
 <section id="stream" class="stream" aria-labelledby="s-h">
   <div class="sec-head"><span class="eyebrow">Cụm 2 · Kafka + Spark Structured Streaming · chạy liên tục</span><h2 id="s-h">Streaming: lượt chấm mới đi vào hệ thống trong vài giây</h2>
-  <p>Một job <code>streaming/stream_stats.py</code> chạy suốt, cứ 5 giây lấy các sự kiện mới từ Kafka ra xử lý (một micro-batch), rồi ghi kết quả vào MongoDB và kho Parquet.</p></div>
-  <div class="diagram" role="img" aria-label="producer.py, nút Chấm sao và rate_from_recs.py gửi sự kiện vào Kafka. Spark Structured Streaming đọc mỗi 5 giây, chạy 4 query: valid, trending, rejected, archive. Kết quả ghi vào MongoDB và kho Parquet; checkpoint ghi nhớ tiến độ.">
+  <p>Job <code>streaming/stream_stats.py</code> chạy ba query (`valid`, `rejected`, `archive`) theo micro-batch; recommendation worker là service riêng. Mặc định mỗi query thử lấy dữ liệu mới sau mỗi 5 giây rồi ghi trạng thái vào MongoDB hoặc Parquet.</p></div>
+  <div class="diagram" role="img" aria-label="producer.py, nút Chấm sao và rate_from_recs.py gửi sự kiện vào Kafka. Spark Structured Streaming đọc mỗi 5 giây, chạy 3 query: valid, rejected và archive. Worker fold-in cập nhật gợi ý; kết quả ghi vào MongoDB và kho Parquet; checkpoint ghi nhớ tiến độ.">
   <svg viewBox="0 0 960 360">
     <defs>
       <marker id="s1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="c-s" d="M0,0 L10,5 L0,10 z"/></marker>
@@ -294,11 +294,11 @@ html { scroll-behavior: smooth; }
 
     <rect class="bx-s" x="410" y="20" width="250" height="250" rx="11"/>
     <text class="t" x="425" y="45">stream_stats.py</text>
-    <text class="s" x="425" y="64">micro-batch mỗi 5 giây · 4 query</text>
+    <text class="s" x="425" y="64">micro-batch mỗi 5 giây · 3 query</text>
     <rect class="box" x="425" y="78" width="220" height="40" rx="7"/>
     <text class="lbl" x="437" y="97">valid</text><text class="s" x="437" y="111">bỏ trùng + watermark 10 phút</text>
     <rect class="box" x="425" y="126" width="220" height="40" rx="7"/>
-    <text class="lbl" x="437" y="145">trending</text><text class="s" x="437" y="159">cửa sổ 10 phút, trượt 5 phút</text>
+    <text class="lbl" x="437" y="145">user_ratings</text><text class="s" x="437" y="159">rating mới nhất theo cặp</text>
     <rect class="box" x="425" y="174" width="220" height="40" rx="7"/>
     <text class="lbl" x="437" y="193">rejected</text><text class="s" x="437" y="207">đếm sự kiện lỗi</text>
     <rect class="box" x="425" y="222" width="220" height="40" rx="7"/>
@@ -312,7 +312,7 @@ html { scroll-behavior: smooth; }
     <text class="t" x="735" y="64">MongoDB · speed view</text>
     <text class="m" x="735" y="90" style="font-size:12px">user_seen</text><text class="s" x="835" y="90">sách vừa chấm</text>
     <text class="m" x="735" y="114" style="font-size:12px">rating_stats</text><text class="s" x="835" y="114">điểm TB</text>
-    <text class="m" x="735" y="138" style="font-size:12px">trending</text><text class="s" x="835" y="138">sách đang hot</text>
+    <text class="m" x="735" y="138" style="font-size:12px">user_ratings</text><text class="s" x="835" y="138">rating hiện hành</text>
     <text class="m" x="735" y="162" style="font-size:12px">online_eval</text><text class="s" x="835" y="162">đoán trúng?</text>
     <text class="m" x="735" y="186" style="font-size:12px">stream_state</text><text class="s" x="835" y="186">batch đã ghi</text>
     <rect class="bx-b" x="720" y="232" width="230" height="58" rx="10"/>
@@ -347,28 +347,28 @@ html { scroll-behavior: smooth; }
       <div class="row"><b>Vì sao</b><p>Kafka tách bên gửi khỏi bên xử lý: Spark tắt thì sự kiện vẫn nằm chờ, bật lại đọc tiếp đúng chỗ. Key <code>user_id</code> giữ các lượt chấm của một người theo đúng thứ tự trong một partition.</p></div>
     </div></div>
     <div class="step"><span class="tag">S3</span><div class="step-body">
-      <h3>Bốn query xử lý và ghi MongoDB</h3>
-      <div class="row"><b>valid</b><p>Lọc sự kiện hợp lệ, bỏ trùng theo <code>event_id</code>, watermark 10 phút để bỏ sự kiện quá trễ; ghi <code>user_seen</code> (app ẩn sách vừa chấm), <code>rating_stats</code>, <code>online_eval</code>.</p></div>
-      <div class="row"><b>trending</b><p>Đếm theo cửa sổ thời gian dài 10 phút, cứ 5 phút mở cửa sổ mới, tính theo lúc người dùng chấm. App chỉ xếp sách có lượt 4–5 sao, nên lượt 1–3 sao không đẩy sách lên "Sách đang hot".</p></div>
+      <h3>Ba query xử lý và ghi MongoDB</h3>
+      <div class="row"><b>valid</b><p>Lọc sự kiện hợp lệ, bỏ trùng theo <code>event_id</code>, watermark 10 phút để bỏ sự kiện quá trễ; upsert rating mới nhất theo cặp vào <code>user_ratings</code>, cập nhật <code>user_seen</code>, tạo job gợi ý và dựng <code>rating_stats</code> từ trạng thái hiện hành.</p></div>
       <div class="row"><b>rejected</b><p>Đếm sự kiện lỗi (số sao ngoài 1–5, thiếu trường) để biết có bao nhiêu dữ liệu bẩn.</p></div>
-      <div class="row"><b>Vì sao</b><p>Mỗi query có trạng thái và chế độ ghi riêng, mỗi query một checkpoint, nên chạy lại độc lập. Ghi theo kiểu upsert theo <code>_id</code> và đánh dấu batch đã ghi (<code>last_batch</code>), nên một batch bị chạy lại không bị cộng hai lần.</p></div>
+      <div class="row"><b>Worker riêng</b><p>Không phải query thứ tư: service dùng profile batch và rating hiện hành. Rating ≥ ngưỡng được dùng làm tín hiệu fold-in; rating thấp chỉ ẩn sách. Mặc định một rating tích cực hợp lệ đã đủ để cập nhật top-10 và thanh tiến độ hiển thị trạng thái xử lý.</p></div>
+      <div class="row"><b>Vì sao</b><p>Mỗi query có checkpoint riêng. Trạng thái rating được ghi theo cặp user–sách và thống kê được dựng lại từ trạng thái đó; dữ liệu sự kiện lỗi chỉ được đếm.</p></div>
     </div></div>
     <div class="step"><span class="tag">S4</span><div class="step-body">
       <h3>Lưu mọi sự kiện ra kho Parquet</h3>
-      <div class="row"><b>Làm gì</b><p>Query <code>archive</code> ghi mọi sự kiện hợp lệ (kể cả sự kiện trễ) vào <code>stream_events</code> bằng file sink của Spark, đúng một lần (exactly-once).</p></div>
+      <div class="row"><b>Làm gì</b><p>Query <code>archive</code> ghi mọi sự kiện hợp lệ (kể cả sự kiện trễ) vào <code>stream_events</code> bằng file sink của Spark; checkpoint file sink giúp xử lý nhất quán khi query chạy lại.</p></div>
       <div class="row"><b>Vì sao</b><p>Đây là chỗ hai lớp nối nhau: lần batch sau, <code>clean.py</code> gộp kho này vào dữ liệu huấn luyện (S5 → B1), nên mô hình học được lượt chấm mới.</p></div>
     </div></div>
     <div class="step"><span class="tag">CP</span><div class="step-body">
       <h3><code>checkpoints/</code>: không mất khi job chết</h3>
-      <div class="row"><b>Làm gì</b><p>Trước mỗi batch, Spark ghi khoảng offset sẽ đọc; sau khi xong thì đánh dấu đã xong. Trạng thái (bỏ trùng, cửa sổ) cũng được lưu.</p></div>
-      <div class="row"><b>Con số</b><p class="num">Thử <code>kill -9</code> job giữa chừng rồi chạy lại: 1.474 = 1.500 − 26 sự kiện trễ, 0 mất, 0 trùng. Thử tắt Kafka 40 giây rồi MongoDB 30 giây: 3.000 = 3.000.</p></div>
+      <div class="row"><b>Làm gì</b><p>Trước mỗi batch, Spark ghi khoảng offset sẽ đọc; sau khi xong thì đánh dấu đã xong. Trạng thái bỏ trùng cũng được lưu.</p></div>
+      <div class="row"><b>Bằng chứng</b><p class="num">Các số fault test cũ trong bảng kết quả là lịch sử, không xác nhận cho code hiện tại. Chạy lại audit và các bài fault test trước khi kết luận về mất/trùng sự kiện.</p></div>
     </div></div>
   </div>
 
   <div class="ask"><h3>Khi bị hỏi về streaming</h3><ul>
     <li><b>Dữ liệu streaming lấy từ đâu?</b> <q>Bộ dữ liệu không có người dùng đang hoạt động nên nhóm mô phỏng: sinh rating giả cho các cặp user–sách chưa có trong Goodbooks (theo độ phổ biến và tỷ lệ số sao thật), producer gửi với thời điểm hiện tại, đánh dấu simulated=true. Nút Chấm sao trong app tạo lượt chấm mới cho sách đang được gợi ý.</q></li>
-    <li><b>Có exactly-once không?</b> <q>Kafka cộng checkpoint là at-least-once; kho Parquet exactly-once nhờ file sink; MongoDB bỏ qua batch đã ghi nhờ last_batch. Các lượt thử sự cố đều 0 mất, 0 trùng.</q></li>
-    <li><b>Sách đang hot tính từ lúc nào?</b> <q>Theo event_time, tức lúc người dùng chấm; cửa sổ 10 phút trượt 5 phút; sự kiện trễ quá 10 phút bị bỏ; chỉ tính sách có lượt 4–5 sao.</q></li>
+    <li><b>Có exactly-once không?</b> <q>Không thể khẳng định end-to-end exactly-once. File sink của Spark dùng metadata/checkpoint cho file đã commit; MongoDB có bảo vệ theo sink ở một số thao tác. Kafka retention hoặc lệch checkpoint vẫn có thể làm mất offset; các fault test cũ chỉ là kết quả lịch sử.</q></li>
+    <li><b>Khi nào gợi ý được cập nhật?</b> <q>Một rating đạt ngưỡng tích cực là đủ theo mặc định. Worker nhận job, fold-in user trên item factors cố định rồi app nạp lại top-10; rating thấp chỉ ẩn sách đã chấm.</q></li>
   </ul></div>
 </section>
 

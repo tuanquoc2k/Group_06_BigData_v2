@@ -1,9 +1,9 @@
 # BookPulse – hệ thống gợi ý sách (BDA501)
 
-Toàn bộ hệ thống chạy bằng Docker trên một máy: Spark (batch + Structured Streaming), Kafka, MongoDB và app Streamlit;
+Toàn bộ hệ thống chạy bằng Docker trên một máy: Spark (batch + Structured Streaming), Kafka, MongoDB, worker fold-in và app Streamlit;
 thành phần MapReduce chạy trên một cụm Hadoop riêng (HDFS + YARN), là nhánh kiểm chứng, xem mục 8. Hệ thống tổ chức
-theo ý tưởng Lambda: lớp batch, lớp tốc độ, lớp phục vụ; chưa hợp nhất batch view và speed view thành một số liệu,
-app chỉ gộp lúc đọc (ẩn sách trong `user_seen`). Sơ đồ: tổng quan [docs/img/architecture_overview.png](docs/img/architecture_overview.png)
+theo ý tưởng Lambda: lớp batch, lớp tốc độ, lớp phục vụ; app đọc `recs_live` trước, nếu không có thì dùng batch view,
+đồng thời lọc sách trong `user_seen` và `user_ratings` sau khi trạng thái tới MongoDB. Sơ đồ tổng quan hiện tại [docs/img/architecture_overview.svg](docs/img/architecture_overview.svg)
 (slide 4), chi tiết [docs/img/architecture_detail.png](docs/img/architecture_detail.png) (slide 5) và bản
 tương tác [docs/kien-truc.html](docs/kien-truc.html).
 
@@ -12,7 +12,9 @@ MapReduce:        CSV → HDFS → Hadoop Streaming (mapper → combiner → red
 (kiểm chứng)                                                              → đối chiếu với Spark SQL (app không dùng)
 Luồng batch:      CSV → clean.py → Parquet → analytics_sql.py (Spark SQL)
                                           → train_als.py (ALS) → write_recs.py → MongoDB
-Luồng streaming:  producer.py → Kafka (rating-events) → stream_stats.py → MongoDB
+Luồng streaming:  producer.py → Kafka (rating-events) → stream_stats.py → user_ratings + recommendation_jobs
+                                                      → recommendation_worker.py (ALS fold-in) → recs_live
+                                                      → rating_stats + user_seen + online_eval
                                                                      → Parquet (stream_events) → clean.py lần sau
 Phục vụ:          MongoDB → app/app.py (Streamlit, http://localhost:8501; trang /setting điều khiển demo)
 ```
@@ -28,7 +30,7 @@ Phục vụ:          MongoDB → app/app.py (Streamlit, http://localhost:8501; 
 ```bash
 cd "D:\Big Data\Group_06_BigData\bookpulse"
 docker compose up -d --build      # lần đầu mất vài phút để build image
-docker compose ps                 # mongo, kafka, spark, app đều phải "running"
+docker compose ps                 # mongo, kafka, spark, app, recommendation-worker đều phải "running"
 ```
 
 Mọi lệnh bên dưới chạy **bên trong container `spark`** bằng `docker compose exec spark ...`.
@@ -38,15 +40,68 @@ Mọi lệnh bên dưới chạy **bên trong container `spark`** bằng `docker
 ```bash
 docker compose exec spark python scripts/make_sample.py
 docker compose exec spark python batch/clean.py --input data/sample/ratings.csv
-docker compose exec spark python batch/train_als.py --eval-users 500
+docker compose exec spark python batch/train_als.py --implicit --ranks 10 --regs 0.1 --alphas 1 --eval-users 500
 docker compose exec spark python batch/write_recs.py --books data/sample/books.csv
 ```
 
-Mở http://localhost:8501, nhập user ID (ví dụ 1) để xem top-10.
+Mở http://localhost:8501 để vào trang demo kiểu nhà sách. Không cần đăng nhập/đăng ký:
+nhập user ID hiện có trong sidebar để xem gợi ý của user đó, hoặc dùng mã khách tạo tự động;
+có thể chuyển giữa gợi ý, khám phá và lịch sử sách đã xem. Mục **Khám phá** hiển thị 12 sách mỗi trang;
+mục **Gợi ý cho bạn** có 100 kết quả, chia 8 sách mỗi trang; ưu tiên ALS/fold-in của user rồi bù sách chưa xem nếu cần.
+Mỗi thẻ sách có bộ chọn sao không số để gửi rating vào Kafka; cần chấm 3 sách khác nhau từ 4★ trở lên
+kể từ lần fold-in gần nhất để kích hoạt lần cập nhật ALS tiếp theo, còn 1–3★ chỉ ghi nhận sách đã xem. Gợi ý có thể lọc thể loại
+hoặc sắp theo điểm ALS, thể loại, đánh giá độc giả và độ phổ biến. Trạng thái chờ và cập nhật được xử lý
+trong riêng lưới sách. Trang **Điều khiển demo** vẫn dùng để bật streaming và phát lô sự kiện mô phỏng.
+App chỉ dùng bìa trong danh mục,
+không gọi Google Books API khi render; phân trang và chỉ vẽ tab đang mở để giảm thời gian tải.
+
+### Cập nhật thể loại sách
+
+`books.csv` dùng `book_id` nội bộ còn `book_tags.csv` liên kết bằng `goodreads_book_id`; script ghép qua mã Goodreads
+để giữ nguyên ID hiện tại. Tải các bảng tag nếu chưa có và chạy pipeline (không đọc/ghi `ratings.csv`):
+
+```bash
+docker compose exec spark python scripts/download_goodbooks.py
+docker compose exec spark python scripts/update_book_genres.py
+```
+
+Pipeline chuẩn hóa tag Goodreads thành tối đa 3 thể loại có bằng chứng mạnh nhất mỗi sách (tag cần ít nhất 5 lượt);
+tag gốc được giữ tối đa 20 tag/sách để kiểm tra. Tag chung như `to-read`, `fiction` hoặc `favorites` không tự tạo
+thể loại. Sách không có tag phù hợp được lưu là `["Unknown"]`. Script ghi `data/goodbooks/books_with_genres.csv`,
+upsert chỉ các trường genre vào `books` trong MongoDB (không ghi đè title/authors hay trường hiện có), và tạo report
+trong `reports/book_genres_*.json`. Chạy lại an toàn; duplicate `book_id` trong file nguồn được bỏ qua.
+
+Tùy chọn bổ sung bằng Google Books chỉ cho sách chưa phân loại; có timeout/retry trong API helper, cache bền trên đĩa,
+và giới hạn mặc định tối đa 500 lượt tra mới mỗi lần:
+
+```bash
+docker compose exec spark python scripts/update_book_genres.py --google-books --google-limit 500
+```
+
+Trong tab **Khám phá**, chọn một hoặc nhiều thể loại; lựa chọn được kết hợp với tìm theo tên/tác giả và các bộ lọc
+hiện có. Genre hiển thị trên cả thẻ sách khám phá lẫn gợi ý; thuật toán ALS và luồng ratings không đổi.
+
+Kết quả thực tế từ dữ liệu Goodbooks hiện có: 10.000 sách đã xử lý, 9.966 có thể loại chuẩn hóa, 34 `Unknown`,
+0 sách không có tag, 0 duplicate ID bị bỏ và 9.478 có nhiều thể loại (tối đa 3). Số sách theo thể loại:
+
+| Thể loại | Số sách | Thể loại | Số sách |
+|---|---:|---|---:|
+| Fantasy | 3.583 | Romance | 3.107 |
+| Mystery | 2.220 | Thriller | 1.954 |
+| Science Fiction | 1.881 | Horror | 743 |
+| Historical Fiction | 1.739 | Contemporary Fiction | 1.569 |
+| Young Adult | 2.615 | Adventure | 1.322 |
+| Biography | 961 | History | 1.264 |
+| Self-Help | 440 | Philosophy | 712 |
+| Poetry | 272 | Non-Fiction | 1.837 |
+| Children | 1.100 | | |
+
+Đây là phân loại heuristic dựa trên tag cộng đồng và số lượt tag, không phải nhãn do nhà xuất bản xác nhận.
+Một số tag Goodreads vẫn có thể mơ hồ; xem `original_tags` và `genre_source` trong MongoDB để kiểm tra.
 
 Luồng streaming không cần gõ lệnh: trang **Điều khiển demo** (http://localhost:8501/setting) có nút bật/dừng job
-streaming, xoá dữ liệu streaming đã thử, chấm sách đang được gợi ý (`rate_from_recs.py`), gửi sự kiện đến trễ
-(`producer.py --late`), chạy `kafka_audit.py` / `nosql_evidence.py`, và **Train lại với rating mới**
+streaming, gửi dữ liệu mô phỏng qua Kafka (có thể chèn sự kiện trễ), chạy `kafka_audit.py` / `nosql_evidence.py`,
+train lại model batch và xóa dữ liệu streaming thử nghiệm trong khu vực bảo trì có xác nhận
 (`scripts/retrain.py`: dừng job streaming → `clean.py` gộp kho sự kiện → `train_als.py --implicit` một bộ tham số →
 `write_recs.py` chuyển phiên bản → bật lại job; đo 15/11: 164–179 giây trên máy 12 core, ước 6–8 phút trên 4 core;
 report `reports/retrain_*.json` ghi top-10 của một user trước/sau và thời gian từng bước), kèm trạng thái và output của từng lệnh. Các nút gọi `scripts/control_server.py`, tiến trình chính của
@@ -63,31 +118,33 @@ docker compose exec spark python streaming/stream_stats.py
 # (mặc định 30 giây, khi Spark đã có watermark) là sự kiện trễ 30 phút (watermark sẽ loại)
 docker compose exec spark python streaming/producer.py --file data/sample/ratings.csv --limit 1000 --late 0.05
 
-# Chấm sao: trong app, mục "Chấm sao" (chọn sách trong top-10, chọn số sao, bấm "Gửi lượt chấm"),
-# hoặc bằng dòng lệnh khi job đang chạy: user 1 chấm 5 sao 2 cuốn đầu trong top-10 hiện tại của mình
+# Tùy chọn kiểm thử fold-in bằng CLI (trang Streamlit không có thao tác chấm sách)
 docker compose exec spark python scripts/rate_from_recs.py --user 1 --n 2 --rating 5
 ```
 
-Bấm "Làm mới" trong app: cột "Điểm TB (stream)", các chỉ số luồng streaming và mục "Sách đang hot" (chỉ sách có lượt
-4–5 sao, xếp theo số lượt 4–5 sao rồi điểm TB, nên lượt 1–3 sao không đẩy sách lên bảng; cửa sổ
-event time 10 phút, trượt 5 phút) thay đổi. `producer.py` phát lại rating **đã có trong dữ liệu huấn luyện**,
+`producer.py` phát lại rating **đã có trong dữ liệu huấn luyện**,
 mà gợi ý đã loại mọi sách người dùng đã chấm, nên sự kiện phát lại không bao giờ làm đổi top-10 và không thể
 "trúng" (chỉ số "Lượt 4–5 sao trúng top-10" hiện dạng trúng / tổng; với riêng producer, số trúng luôn là 0). Muốn thấy sách vừa chấm
-biến mất khỏi top-10 và cuốn tiếp theo được đẩy lên, dùng mục **Chấm sao** của app (app chỉ gửi sự kiện vào Kafka,
-không ghi MongoDB) hoặc `scripts/rate_from_recs.py` (đọc top-10 hiện tại trong MongoDB và gửi rating cho `--n` cuốn
-đầu); sau một trigger (5–10 giây) job streaming ghi `user_seen` và app ẩn chúng.
-Trong lúc job chạy, Spark UI → tab **Structured Streaming** (http://localhost:4040) hiện 4 query có tên;
+biến mất khỏi top-10 và cuốn tiếp theo được đẩy lên, dùng `scripts/rate_from_recs.py` (đọc top-10 hiện tại trong MongoDB và gửi rating cho `--n` cuốn
+đầu); sau khi query streaming ghi MongoDB (trigger 5 giây, có thể lâu hơn khi batch chậm), app lọc sách đã chấm từ
+`user_seen`/`user_ratings`, đồng thời xếp job fold-in. Nếu streaming dừng hoặc sự kiện vượt watermark, sách chưa được
+lọc khỏi danh sách cho tới khi trạng thái rating được xử lý. Worker chỉ tính ALS fold-in sau khi user có ít nhất
+`FOLD_IN_MIN_RATINGS` rating sách khác nhau mới từ stream đạt `ALS_MIN_RATING` kể từ snapshot gần nhất
+(mặc định lần lượt là 3 sách và 4 sao). Rating 1–3 vẫn được giữ là đã xem nhưng
+không là tín hiệu thích. `event_time` do producer/app gán, `ingested_at` do stream job ghi.
+Trong lúc job chạy, Spark UI → tab **Structured Streaming** (http://localhost:4040) hiện 3 query có tên;
 `reports/stream_progress_*.json` ghi tiến độ từng query. Chi tiết thiết kế và bằng chứng: [docs/streaming.md](docs/streaming.md).
 
 **Không chạy luồng batch song song với streaming.** Chỉ cổng 4040 của Spark UI được mở ra máy host (job thứ hai
 sang 4041, không xem được), và hai driver 4 GB vượt 7,7 GiB RAM của Docker. Dừng job streaming (Ctrl+C) trước khi
-chạy batch. Vì vậy trên máy này hai lớp chạy lần lượt: trong 25–35 phút chạy `run_pipeline.sh`, sự kiện chờ trong
+chạy batch. Vì vậy trên máy này hai lớp chạy lần lượt: khi `run_pipeline.sh` chạy, sự kiện chờ trong
 Kafka (giữ 7 ngày), app vẫn phục vụ gợi ý và speed view cũ; khi job streaming chạy lại, nó đọc bù tối đa 20.000
 offset mỗi batch. Trên cluster: batch chạy trên cụm riêng, streaming chạy thường trực.
 
 ## 3. Chạy với Goodbooks-10k (dữ liệu thật)
 
-Chạy cả luồng batch bằng một lệnh (khoảng 25–35 phút): `bash scripts/run_pipeline.sh`. Hoặc từng bước:
+Chạy cả luồng batch bằng một lệnh: `bash scripts/run_pipeline.sh`. Thời gian thực tế tùy cấu hình máy; xem report
+`reports/pipeline_*.json`. Hoặc từng bước:
 
 ```bash
 docker compose exec spark python scripts/download_goodbooks.py
@@ -96,6 +153,9 @@ docker compose exec spark python batch/analytics_sql.py --books data/goodbooks/b
 docker compose exec spark python batch/train_als.py             # ALS explicit + baseline (RMSE, Precision@10)
 docker compose exec spark python batch/train_als.py --implicit --ranks 20,50 --regs 0.1 --alphas 1,10
 docker compose exec spark python batch/write_recs.py --books data/goodbooks/books.csv
+docker compose exec spark python scripts/foldin_eval.py --eval-users 1000
+docker compose exec spark python scripts/diagnose_foldin.py
+docker compose exec spark python scripts/measure_latency.py --users 100
 docker compose exec spark python streaming/producer.py --limit 2000
 # hoặc phát dữ liệu giả "mới": các cặp user–sách KHÔNG có trong ratings.csv (không cần train lại, số liệu không đổi)
 docker compose exec spark python scripts/make_fake_stream.py   # -> data/fake/stream_ratings.csv (5000 dòng, seed 2026)
@@ -105,13 +165,93 @@ docker compose exec spark python scripts/nosql_evidence.py     # đọc lại Mo
 docker compose exec spark python scripts/kafka_audit.py        # đếm lại Kafka và đối chiếu với số đếm streaming trong MongoDB
 ```
 
-**App dùng ALS implicit** (`models/als_implicit`), chọn theo Precision@10 chứ không theo RMSE; lý do và số liệu ở
+`foldin_eval.py` báo cáo replay offline chia theo 1, 2, 3, 5, 10 positive ratings, kiểm tra vector và latency tính toán.
+Để chạy `diagnose_foldin.py` và đo end-to-end bằng `measure_latency.py`, cần khởi động
+`streaming/stream_stats.py` (hoặc nút **Điều khiển demo**) trước đó. Diagnosis dùng hai user ID test mới: seed hồ sơ,
+rate một sách đang trong top-10 và một sách latent-score thấp ngoài top-10, rồi kiểm tra rating → job → vector → live
+→ danh sách app. Các sự kiện đều được đánh dấu mô phỏng; script xóa document test đã hoàn tất, giữ Kafka/Parquet và
+không dọn user chưa hoàn tất nếu bị timeout. Latency script phát tối thiểu 100 rating mô phỏng cho user riêng biệt,
+đo đến `recs_live` cùng các pha worker, ghi report rồi xóa riêng các document MongoDB của user đã hoàn tất.
+
+**App dùng ALS implicit** (`models/als_implicit/versions/<model_version>`), chọn theo Precision@10 chứ không theo RMSE; lý do và số liệu ở
 [docs/chon-mo-hinh.md](docs/chon-mo-hinh.md). `--implicit` thử mọi tổ hợp rank × regParam × alpha trên một phần
-validation tách từ tập train (lưới tham số fit trên 80% của tập train), rồi fit lại trên toàn bộ tập train và đánh
-giá một lần trên tập test. Mô hình app dùng chính là mô hình đã đánh giá, tức fit trên toàn bộ tập train (80% dữ liệu,
-4.780.968 rating); khoảng 1,2 triệu rating của tập test không được học. Khi triển khai thật
-nên fit lại trên 100% dữ liệu với tham số đã chọn (rank 50, alpha 1, regParam 0,1) rồi mới ghi gợi ý.
+validation tách theo user từ tập rating >= `ALS_MIN_RATING` (mặc định 4), rồi fit lại trên toàn bộ tập train và đánh
+giá trên test đã giữ lại ngẫu nhiên theo từng user. Rating thấp không dùng làm tín hiệu ALS nhưng luôn nằm trong tập
+sách đã chấm để loại khỏi gợi ý. Mỗi lần train lưu `item_ids.npy`, `item_factors.npy` (float32), `YtY.npy` (float64),
+`alpha`, `regParam`, rank, ngưỡng và `model_version` trong thư mục phiên bản riêng; `write_recs.py` chỉ chuyển
+`meta.active` sau khi ghi xong. Artifact `.npz` từ các phiên bản cũ vẫn được hỗ trợ để đọc.
 Muốn quay về mô hình explicit: `write_recs.py --model als`.
+
+### ALS fold-in: suy luận vector user
+
+Worker không huấn luyện tăng dần và không thay đổi vector sách. Với S là các rating hiện hành >= ngưỡng,
+`common/foldin.py` giải:
+
+```text
+c1_i = alpha * rating_i
+A = YtY + sum(c1_i * y_i * y_i.T) + regParam * |S| * I
+b = sum((1 + c1_i) * y_i)
+x_u = solve(A, b)
+score = Y @ x_u
+```
+
+`YtY` được xuất một lần từ toàn bộ `itemFactors`; phép giải dùng NumPy `float64`, không dùng nghịch đảo.
+Rating thấp không ảnh hưởng vector nhưng mọi sách đã chấm đều bị loại khỏi top-k. Sách không có trong itemFactors
+bị bỏ qua và ghi log. Nếu có ít hơn `FOLD_IN_MIN_RATINGS` positive rating mới từ stream kể từ snapshot gần nhất
+(mặc định 3), worker giữ
+gợi ý batch thay vì giải vector ALS. Alpha, rank, regParam, threshold và model version được kiểm tra từ manifest;
+`FOLD_IN_MIN_RATINGS` và `FOLD_IN_TOP_K` cấu hình qua biến môi trường (mặc định 3 và 100). Sidebar cho phép nhập
+user ID, và trạng thái fold-in hiển thị thanh tiến độ theo pha cùng thời gian thực đã trôi qua.
+
+Các phần trong module:
+
+- `load_model(path)`: kiểm tra manifest, shape và `YtY`; tạo map book_id → hàng một lần và cảnh báo lệch model version.
+- `fold_in(ratings, model)`: lọc positive rating, bỏ sách mới/không biết và giải vector; trả `None` khi chưa đủ tín hiệu.
+- `recommend(user_ratings, seen_ids, model, k)`: tính `Y @ x`, loại mọi sách đã chấm và chọn top-k bằng `argpartition`.
+- `batch/train_als.py`: xuất `item_ids`, `factors` float32, `YtY` float64 và metadata vào phiên bản model.
+- `streaming/recommendation_worker.py`: gộp profile batch với rating stream mới nhất; claim job có token để worker đã mất lease không thể ghi kết quả; job được xếp lại nếu model đổi trong lúc xử lý.
+
+Chạy kiểm thử fold-in và worker trong image Docker:
+
+```bash
+docker compose exec spark pytest -q
+```
+
+Sau khi đã train model implicit và có `data/parquet/ratings`, đo độ khớp trên 20 user ngẫu nhiên,
+độ trễ cho một user/1.000 user, và Precision@10 trước/sau fold-in:
+
+```bash
+docker compose exec spark python scripts/foldin_eval.py --vector-check-users 20 --benchmark-users 1000
+```
+
+Báo cáo thực tế được in ra terminal và lưu thành `reports/foldin_eval_*.json`; nếu chưa chạy lệnh này trên model/dataset
+cụ thể, không có số đo nào được giả định. Vector user đã lưu của Spark có thể không trùng chính xác phép giải lại trên
+itemFactors cuối cùng vì ALS luân phiên cập nhật user/item; hãy đọc cosine similarity và sai số tuyệt đối đo được.
+Fold-in không cập nhật vector sách, không tạo vector cho sách mới và không cá nhân hóa user hoàn toàn mới nếu chưa đủ
+positive rating.
+
+**Báo cáo lịch sử** của model `20261115_173217_451302` trên 1.000 user replay (20 user kiểm tra vector; không
+đại diện model/worker đang chạy). Chạy lại các lệnh trên để tạo bằng chứng cho phiên bản hiện tại:
+
+| Kiểm tra | Kết quả |
+|---|---:|
+| Cosine similarity trung bình với `model.userFactors` | 0.9999999999999998 |
+| Sai số tuyệt đối lớn nhất giữa vector | 2.7462756402307775e-08 |
+| Precision@10 batch → fold-in | 0.1167 → 0.0802 |
+| Recall@10 batch → fold-in | 0.1611 → 0.1061 |
+| Top-10 Jaccard batch/fold-in | 0.1643 |
+| Một user: thời gian khuyến nghị | 0.03027 giây |
+| 1.000 user tuần tự: trung bình / p95 | 0.01169 / 0.02873 giây mỗi user |
+| 1.000 user tuần tự: tổng thời gian | 11.69683 giây |
+
+Fold-in khớp gần như chính xác trên mẫu train, nhưng **Precision@10 và Recall@10 giảm** trong replay này;
+fold-in không đảm bảo cải thiện chất lượng. Số đo chi tiết theo từng user nằm trong
+[`reports/foldin_eval_20261115_182747.json`](reports/foldin_eval_20261115_182747.json).
+
+Để so sánh ngưỡng 3 và 4, chạy cùng cấu hình hai lần rồi đối chiếu `reports/train_als_implicit_*.json`:
+`docker compose exec -e ALS_MIN_RATING=3 spark python batch/train_als.py --implicit --ranks 50 --regs 0.1 --alphas 1`
+và tương tự với `ALS_MIN_RATING=4`. `scripts/session9/ranking_eval.py` cũng đo threshold 3 so với model đang phục vụ
+trên cùng test set. Không tái sử dụng Precision@10 0,204 từ quy trình train cũ như kết quả mới.
 
 Với UCSD Book Graph: tải tay một file thể loại vào `data/ucsd/`, rồi
 `python batch/clean.py --input data/ucsd/<file>.csv` (rating 0 = chưa chấm, tự động bị loại).
@@ -128,10 +268,14 @@ Mỗi bước ghi một file JSON vào `reports/`:
 | `nosql_evidence_*.json` | số document mỗi collection, document mẫu, query plan và độ trễ đọc theo `_id`, đối chiếu số đếm streaming; `recs_vs_training_ratings`: kiểm tra độc lập bằng pandas rằng không cặp (user, sách) nào trong gợi ý và danh sách bù đã có trong rating huấn luyện |
 | `train_als_*.json` | RMSE (ALS so với 2 baseline), Precision@10 / Recall@10 và số đầu sách được gợi ý (ALS so với sách phổ biến), tham số tốt nhất, thời gian huấn luyện |
 | `train_als_implicit_*.json` | ALS implicit: Precision@10 của từng tổ hợp tham số trên validation, kết quả trên tập test |
-| `write_recs_*.json` | phiên bản mô hình, số người dùng đã ghi |
-| `stream_progress_*.json` | tiến độ từng query streaming: số batch, dòng vào, tốc độ, thời gian batch, sự kiện bị watermark loại, bản trùng, trạng thái, watermark |
-| `kafka_audit_*.json` | đếm lại toàn bộ topic Kafka (message, sự kiện hợp lệ, sự kiện trễ, message lỗi); khối `mongo_check` đọc lại MongoDB và ghi ba phép so: `no_loss_no_double_count` (đếm được = hợp lệ − trễ = tổng `rating_stats`), `rejected_match` (sự kiện lỗi), `trending_match` (tổng các cửa sổ = 2 × (hợp lệ − trễ), vì mỗi sự kiện đúng hạn nằm trong 2 cửa sổ trượt); khối `archive_check` đếm kho `data/parquet/stream_events` qua log `_spark_metadata` (chỉ file đã commit): số dòng = số message hợp lệ (kho giữ cả bản lặp và sự kiện trễ), `event_id` khác nhau = sự kiện hợp lệ khác nhau, số file chưa commit trên đĩa, `exactly_once`. `--no-mongo` để chỉ đếm Kafka, `--no-archive` để bỏ qua kho |
-| `streaming/*.png` | ảnh Spark UI (tab Structured Streaming) và app "Sách đang hot" |
+| `write_recs_*.json` | phiên bản mô hình và bản phục vụ, số người dùng đã ghi |
+| `foldin_eval_*.json` | offline replay: Precision@10, Recall@10, Jaccard trước/sau fold-in, theo positive-history size 1/2/3/5/10; vector checks và latency local |
+| `foldin_diagnostic_*.json` | hai trace mô phỏng qua Kafka/MongoDB: rating trong top-10 và rating ngoài top-10, vector delta, top-10 và kết quả app |
+| `stream_latency_*.json` | độ trễ event mô phỏng → ingestion → `recs_live` cho tối thiểu 100 user riêng biệt, gồm pha fold-in, ranking và MongoDB |
+| `pipeline_*.json` | thời gian toàn pipeline, có gồm `write_recs.py` |
+| `stream_progress_*.json` | tiến độ ba query streaming (`valid`, `rejected`, `archive`): số batch, dòng vào, tốc độ, thời gian batch, watermark |
+| `kafka_audit_*.json` | đếm lại Kafka; đối chiếu `stream_state`, `user_ratings`, `rating_stats`, archive; liệt kê offset-loss incidents đã ghi nhận |
+| `streaming/*.png` | ảnh lịch sử Spark UI và app; ảnh app được chụp trước khi gỡ thao tác chấm sao khỏi giao diện |
 | `streaming/fault_test_*/` | log của `scripts/stream_fault_test.sh` (thử `kill -9` job streaming) |
 | `streaming/outage_test_*/` | log của `scripts/stream_outage_test.sh` (thử ngắt Kafka và MongoDB); `events.log` là dòng thời gian |
 | `scaling/docker_stats_*.csv` | `docker stats` mỗi 5 giây khi chạy batch (RAM đỉnh) |
@@ -153,37 +297,47 @@ Spark UI khi job đang chạy: http://localhost:4040
 | `recommendations_<phiên bản>` | write_recs.py | top-30 sách chưa đọc cho mỗi người dùng, kèm `fallback`: 10 sách phổ biến người đó chưa chấm |
 | `meta` (`_id: "active"`) | write_recs.py | phiên bản đang dùng, phiên bản trước (`previous_collection`, để quay lại) + danh sách sách phổ biến (cold start) |
 | `books` | write_recs.py | tên sách, tác giả (không có phiên bản; upsert theo `_id` trước khi chuyển `meta.active`) |
-| `rating_stats` | stream_stats.py | điểm trung bình và số lượt chấm **chỉ từ luồng streaming** kể từ lần reset (lớp nhanh); không gộp với thống kê batch. Cột "Điểm TB (stream)" trong app đọc từ đây |
+| `user_profiles_<phiên bản>` | write_recs.py | rating tích cực và toàn bộ sách đã chấm theo user, tạo từ batch history để worker fold-in không quên lịch sử |
+| `user_ratings` | stream_stats.py | Rating stream mới nhất theo unique `(user_id, book_id)`, kèm `event_time` và `ingested_at` |
+| `recommendation_jobs` | stream_stats.py + worker | Job fold-in theo user; pending được gộp/debounce, processing có timeout và retry |
+| `recs_live` | recommendation_worker.py | `_id=user_id`, top-30, `source=als-foldin`, `model_version`, thời điểm và độ trễ |
+| `rating_stats` | stream_stats.py | điểm trung bình và số cặp user–sách hiện hành **chỉ từ luồng streaming**; số liệu được tính lại từ `user_ratings`, nên chấm lại một sách không làm tăng số lượt cặp |
 | `user_seen` | stream_stats.py | sách người dùng vừa chấm (app ẩn khỏi top-10) |
 | `online_eval` | stream_stats.py | số lượt chấm 4–5 sao và số lượt trong đó cuốn sách nằm trong 10 gợi ý đầu **đã lưu** của phiên bản active (không trừ sách đã ẩn, không tính sách bù); cộng dồn qua các phiên bản, `model_version` là phiên bản mới nhất; app hiện "Lượt 4–5 sao trúng top-10" dạng trúng / tổng |
 | `stream_state` | stream_stats.py | batch cuối đã ghi (chống đếm hai lần khi restart), số sự kiện hợp lệ / bị loại |
-| `trending` | stream_stats.py | số lượt chấm, điểm TB, lượt 4–5 sao theo (cửa sổ event time, sách); TTL index tự xóa sau 24 giờ |
 
 Xem nhanh: `docker compose exec mongo mongosh bookpulse --eval "db.meta.findOne()"`
 
 ## 6. Thiết kế đã chọn
 
-- **Hai tốc độ cập nhật:** thay đổi nhanh (vừa đọc, vừa chấm) do streaming xử lý trong vài giây;
-  gu đọc mới, người dùng mới, sách mới chờ lần chạy batch sau (huấn luyện lại ALS rồi ghi phiên bản mới).
-- **Top-30, app lọc còn 10:** người dùng không thấy lại cuốn vừa đọc mà không phải huấn luyện lại ALS.
-  Khi đã đọc gần hết danh sách, app bù bằng `fallback` (sách phổ biến người đó chưa chấm) để luôn đủ 10 cuốn;
+So sánh bốn mô hình NoSQL, lựa chọn MongoDB và phác thảo cloud (đều ghi rõ phần nào chỉ là thiết kế) nằm trong [`docs/serving-deployment.md`](docs/serving-deployment.md).
+
+- **Hai tốc độ cập nhật:** sự kiện chấm sao vào Kafka; streaming upsert latest `user_ratings`, giữ `user_seen` để ẩn sách
+  ngay và gộp job; recommendation worker tính lại vector user trên item factors cố định rồi upsert `recs_live`. App đọc
+  live trước, rồi batch. Worker kết hợp lịch sử trong `user_profiles_<version>` với rating stream mới nhất; cần ít nhất
+  `FOLD_IN_MIN_RATINGS` (mặc định 3) rating stream tích cực (>= `ALS_MIN_RATING`, mặc định 4) cho các sách khác nhau
+  trước khi giải vector fold-in.
+  User chưa có tín hiệu phù hợp và sách mới vẫn dùng danh sách
+  khởi đầu/batch/phổ biến. Tab **Dành cho bạn** hiển thị pending, processing, hoàn tất hoặc lỗi và tự làm mới khi thành công.
+- **Top-100, app lọc sách đã xem:** người dùng không thấy lại cuốn vừa đọc mà không phải huấn luyện lại ALS.
+  Khi đã đọc gần hết danh sách, app bù bằng `fallback` (sách phổ biến người đó chưa chấm) để đủ kết quả;
   cột "Nguồn" ghi rõ cuốn nào do ALS, cuốn nào là bù.
-- **Streaming không huấn luyện lại theo từng sự kiện; train lại theo đợt bằng nút hoặc theo lịch:** một lần
-  train mất khoảng 3 phút trên máy 12 core (đo 15/11: clean 26–28 s, fit 71–74 s, write_recs 65 s; ước 6–8 phút trên 4 core) và cần dừng job streaming (hai driver 4 GB không vừa RAM), nên `scripts/retrain.py` gom cả
+- **Fold-in không huấn luyện lại ALS:** chỉ giải lại vector user từ rating >= ngưỡng trên vector sách cố định. Train
+  lại ALS theo đợt bằng nút (trên môi trường hiện tại; chưa cấu hình scheduler): `scripts/retrain.py` gom cả
   vòng (dừng job → `clean.py` → `train_als.py --implicit --ranks 50 --regs 0.1 --alphas 1` → `write_recs.py` → bật lại
   job) thành một lệnh, chạy từ nút "Train lại với rating mới" ở trang /setting hoặc bằng
-  `docker compose exec spark python scripts/retrain.py --user 1`. Production: cron/Airflow gọi cùng script khi kho
-  `stream_events` có đủ sự kiện mới hoặc theo lịch đêm. Cập nhật vector người dùng tức thì (fold-in, giữ nguyên vector
-  sách) là bước tiếp theo, chưa làm.
+  `docker compose exec spark python scripts/retrain.py --user 1`. Cần dừng job streaming vì hai driver 4 GB không vừa
+  RAM. Production có thể dùng cron/Airflow gọi script theo lịch hoặc khi kho `stream_events` đạt ngưỡng sự kiện mới.
 - **Rating từ streaming vào lần huấn luyện sau:** `stream_stats.py` lưu **mọi** sự kiện hợp lệ (kể cả trùng
-  và đến trễ) ra `data/parquet/stream_events` (file sink, không trạng thái, exactly-once nhờ `_spark_metadata`
-  + checkpoint). `clean.py` bỏ trùng chính xác theo `event_id` rồi gộp với CSV; cùng một cặp (user, book) thì
+  và đến trễ) ra `data/parquet/stream_events`. File sink dùng `_spark_metadata` + checkpoint để nhận diện file đã
+  commit khi query chạy lại; đây không phải bảo đảm exactly-once đầu-cuối. `clean.py` bỏ trùng chính xác theo
+  `event_id` rồi gộp với CSV; cùng một cặp (user, book) thì
   lấy rating mới hơn. Report `clean_*.json` ghi số dòng lưu trữ, số sự kiện sau bỏ trùng, số cặp cập nhật/mới.
   Vòng này đã chạy thật ngày 06/11 (`reports/clean_20261106_122043.json` gộp 4.901 dòng), nhưng `reset_streaming.sh`
   xóa kho `stream_events` trước mỗi lượt demo/thử, nên lần làm sạch của mô hình cuối (`clean_20261106_123904.json`)
   có `stream_events` = null: mô hình cuối (P@10 0,204) được huấn luyện không có sự kiện streaming. Kho giữ sự kiện cho
   lần huấn luyện sau cho đến khi chạy `reset_streaming.sh`; production: kho sự kiện là dữ liệu gốc bất biến, không reset.
-  `producer.py`, `rate_from_recs.py` và nút Chấm sao của app đánh dấu `simulated=true`. `clean.py` mặc định gộp cả sự
+  `producer.py` và `rate_from_recs.py` đánh dấu `simulated=true`. `clean.py` mặc định gộp cả sự
   kiện mô phỏng (để demo được vòng chấm sao → huấn luyện lại → gợi ý mới) và bỏ chúng khi chạy với `--exclude-simulated`;
   report `clean_*.json` đếm riêng `real_events` và `simulated_events`. Kết quả làm sạch có cột `from_stream`, và
   `train_als.py` luôn đưa rating đến từ streaming vào tập train (rating CSV mới chia ngẫu nhiên 80/20), nên mô hình phục vụ
@@ -191,7 +345,7 @@ Xem nhanh: `docker compose exec mongo mongosh bookpulse --eval "db.meta.findOne(
   được học (thử 10/11: 1/11 lượt, `A Game of Thrones` của user 22). Kho là file sink trigger 5 giây, chia theo
   `event_date`, không compaction, nên sinh nhiều file nhỏ (production: trigger dài hơn cho query này, hoặc compaction /
   Delta Lake / Iceberg).
-- **Lớp nhanh bỏ sự kiện trễ, lớp batch giữ lại:** thống kê trực tiếp và "sách đang hot" dùng watermark 10 phút
+- **Lớp nhanh bỏ sự kiện trễ, lớp batch giữ lại:** các phép tính streaming có trạng thái dùng watermark 10 phút
   để giới hạn bộ nhớ trạng thái, nên bỏ sự kiện trễ hơn thế; kho lưu trữ thì giữ lại để không mất rating thật.
   Spark 3.5 lọc sự kiện trễ bằng watermark của batch **trước**, nên 1–2 batch đầu sau khi khởi động mới (checkpoint
   trống) chưa lọc; chạy lại từ checkpoint thì watermark được khôi phục. Vì vậy producer chỉ gửi sự kiện trễ sau 30 giây
@@ -199,32 +353,25 @@ Xem nhanh: `docker compose exec mongo mongosh bookpulse --eval "db.meta.findOne(
   khỏi app cho tới lần batch sau (có thể sửa bằng cách ghi `user_seen`, vốn là upsert idempotent, từ một nhánh không
   trạng thái như kho lưu trữ).
 - **Theo ý tưởng Lambda, chưa hợp nhất hai view:** `rating_stats` chỉ chứa rating từ streaming; thống kê theo sách
-  của MapReduce / Spark SQL dùng để phân tích và đối chiếu, không được nạp vào MongoDB; app chỉ gộp lúc đọc. Hai lớp
-  **không** cho cùng kết quả: `clean.py` giữ một rating mới nhất cho mỗi cặp (user, book), lớp tốc độ đếm mọi
-  `event_id` khác nhau (chấm lại bị tính hai lần trong `rating_stats`) và bỏ sự kiện trễ hơn watermark; vì vậy hai view
-  không được cộng với nhau. Muốn hợp nhất cần lớp tốc độ theo (user, book) và một mốc cắt (ghi trong `meta` mốc mà batch
-  đã hấp thụ, chỉ cộng speed view sau mốc); hiện chưa có, nên `rating_stats` và `user_seen` tăng tới khi reset. Không dùng Kappa vì log Kafka không phải nguồn gốc: 6 triệu rating lịch sử chưa từng đi qua Kafka, và
+  của MapReduce / Spark SQL dùng để phân tích và đối chiếu, không được nạp vào MongoDB; app chỉ gộp lúc đọc. `rating_stats`
+  được tính từ rating mới nhất cho mỗi cặp trong `user_ratings`, không phải tổng sự kiện; các sự kiện bị watermark loại
+  vẫn có trong kho Parquet để lần batch sau được gộp. Không dùng Kappa vì log Kafka không phải nguồn gốc: 6 triệu rating lịch sử chưa từng đi qua Kafka, và
   Kafka chỉ giữ 7 ngày; muốn Kappa phải nạp lịch sử vào topic, giữ log lâu dài rồi huấn luyện lại bằng cách đọc lại log.
-- **Đổi phiên bản gợi ý an toàn (chỉ phần gợi ý):** gợi ý mới ghi vào collection mới; cổng kiểm tra số document ghi
-  được phải bằng số người dùng cần ghi (nếu không: xóa collection mới, job báo lỗi, `meta.active` giữ bản cũ); `books`
-  upsert theo `_id` **trước** khi chuyển; rồi mới chuyển `meta.active`. Giữ đúng phiên bản đang dùng và phiên bản trước
-  (`previous_collection` trong `meta`; quay lại bằng cách đặt `recs_collection` về giá trị này), xóa collection sót lại
-  của lần chạy hỏng. Đã thử trên database riêng `bookpulse_test` (`reports/superseded/write_recs_gate_test_20261108/`:
-  53.424/53.424 người dùng, nhánh cho qua; nhánh chặn chỉ có trong code). Còn lại: cổng chỉ kiểm tra đủ số lượng,
-  không so chất lượng (Precision@10) trước khi chuyển; `model_version` là thời điểm `write_recs.py` chạy;
-  `models/als_implicit` và `data/parquet/ratings` bị ghi đè tại chỗ, không có phiên bản.
-- **Chống đếm hai lần:** Spark + Kafka + checkpoint là at-least-once; batch nào đã ghi thì bỏ qua khi bị phát lại
-  (`stream_state.last_batch`). Lượt thử `kill -9` (`scripts/stream_fault_test.sh`): 1.474 = 1.500 − 26 sự kiện trễ,
-  0 mất, 0 trùng (26 sự kiện trễ bị loại là suy từ kafka_audit; file progress chỉ ghi 0 + 23 vì batch commit ngay
-  trước `kill -9` không nằm trong file nào). Còn một khe hở: nếu job chết đúng lúc đang ghi MongoDB (`rating_stats` và
-  `online_eval` cộng dồn trước khi ghi `last_batch`), batch phát lại có thể cộng lặp một phần. `kill -9` ở thời điểm
-  bất kỳ gần như chắc chắn không rơi vào khe vài mili giây này, nên "0 trùng" không chứng minh khe đã đóng (muốn thử cần
-  chèn lỗi ngay sau `bulk_write`). Cách sửa, chưa làm: lọc `{_id: book, last_batch: {$lt: batch_id}}` rồi `$inc` cùng
-  `$set last_batch` (nguyên tử trên một document, không cần transaction). Nếu batch id nhỏ hơn `last_batch`
-  (checkpoint bị xóa nhưng MongoDB còn), job dừng với lỗi thay vì âm thầm bỏ qua (sửa 08/11). Kho Parquet exactly-once (file sink); "sách đang hot" idempotent vì mỗi lần
-  ghi thay cả document (ReplaceOne). "0 mất" là kết quả đo, không phải bảo đảm: `stream_stats.py` đặt
-  `failOnDataLoss=false`, nên nếu job tắt lâu hơn thời gian giữ của Kafka (mặc định 168 giờ) hoặc topic bị tạo lại,
-  Spark chỉ ghi cảnh báo và bỏ qua offset đã mất (production: `failOnDataLoss=true` + cảnh báo theo lag).
+- **Đổi phiên bản gợi ý an toàn:** recommendations và user profiles ghi vào collection mới; chỉ chuyển `meta.active`
+  sau khi cả hai collection đủ số user dự kiến. Khi kiểm tra thất bại, staging collections không được phục vụ và active cũ giữ
+  nguyên. `books` upsert trước khi chuyển; các phiên bản collection cũ được giữ để không xóa dữ liệu tự động. `model_version`
+  đến từ manifest train, `serving_version` là lần ghi gợi ý. Chưa có quality gate Precision@10; model artifacts có
+  version trong `models/<name>/versions/`, còn Parquet `ratings` ghi đè tại chỗ.
+- **Chống đếm hai lần:** Spark + Kafka + checkpoint là at-least-once. `online_eval` lưu
+  `last_batch` ngay trên từng document; `rating_stats` được tính lại từ các cặp hiện hành; `user_seen` và `user_ratings`
+  là upsert theo cặp. Các cập nhật dùng MongoDB atomicity theo document, khép khe cộng lặp giữa `bulk_write` và
+  `mark_applied`. Batch mismatch với checkpoint vẫn dừng rõ ràng. Kho Parquet exactly-once nhờ file sink metadata.
+  Thử nghiệm `kill -9` trước đó vẫn là kết quả đo, không phải bảo đảm về mọi lỗi. "0 mất" không được đảm bảo:
+  `stream_stats.py` đặt
+  `failOnDataLoss=false`, nên nếu job tắt lâu hơn thời gian giữ Kafka (mặc định 168 giờ) hoặc topic bị tạo lại,
+  Spark có thể bỏ qua offset đã mất. `stream_stats.py` hiện so offset bắt đầu của micro-batch với earliest offset
+  trên broker và ghi incident vào `stream_state`; `kafka_audit.py` báo cáo các incident đã phát hiện. Cơ chế này
+  cảnh báo/ghi nhận, không khôi phục record đã hết retention; chưa có incident thật được đo trong lượt này.
 - **Producer chịu được Kafka dừng ngắn:** trước khi sửa, lượt ngắt Kafka 40 giây làm producer mất 571 message, vì
   kafka-python 2.0.2 hủy bản ghi chờ trong buffer quá `request_timeout_ms` (mặc định 30 giây) và không có callback
   kiểm tra. Thay đổi quyết định là `request_timeout_ms=120000` (chờ tới 2 phút); thêm `retries=10`,
@@ -233,31 +380,42 @@ Xem nhanh: `docker compose exec mongo mongosh bookpulse --eval "db.meta.findOne(
   theo `event_id` xử lý được. Không có idempotent producer, nên sau retry thứ tự trong partition không được bảo đảm (job
   dùng `event_time`). `acks=all` với replication 1 tương đương `acks=1`; chỉ có ý nghĩa khi replication 3,
   `min.insync.replicas=2`.
-- **Ghi MongoDB chạy ở driver:** query `valid` và `trending` đều gom mỗi micro-batch về driver rồi ghi bằng một
+- **Ghi MongoDB chạy ở driver:** query `valid` gom mỗi micro-batch về driver rồi ghi bằng một
   client MongoDB (`rejected` chỉ đếm). Đủ cho
   tốc độ sự kiện của đồ án; `--max-offsets` (`maxOffsetsPerTrigger`, mặc định 20.000) giới hạn một batch sau khi
   job tắt lâu. Ở quy mô lớn cần chuyển việc ghi sang executor (`foreachPartition` hoặc MongoDB Spark connector,
   gộp theo sách trong Spark trước khi ghi). Mặc định nguồn Kafka đọc mỗi partition bằng một task (`minPartitions` chia
   nhỏ thêm được); phần có trạng thái chạy trên 8 shuffle partition. **Chưa thử tải**: ở 20 sự kiện/giây batch mất 3–6
-  giây, phần lớn là chi phí cố định (4 query chia 4 core); 20.000 offset/batch chưa được hiệu chỉnh.
+  giây, phần lớn là chi phí cố định (3 query chia 4 core); 20.000 offset/batch chưa được hiệu chỉnh.
 - **Đánh giá online:** mỗi lượt chấm 4–5 sao được đối chiếu với 10 gợi ý đầu đã lưu của phiên bản active (không trừ
   sách đã ẩn, không tính sách bù); bộ đếm cộng dồn qua các phiên bản. Với `producer.py`
-  kết quả luôn là 0 trúng (sách phát lại đã bị loại khỏi gợi ý); chỉ lượt chấm sách đang được gợi ý (nút Chấm sao hoặc `rate_from_recs.py`) tạo được lượt trúng.
+  kết quả luôn là 0 trúng (sách phát lại đã bị loại khỏi gợi ý); chỉ lượt chấm sách đang được gợi ý qua CLI `rate_from_recs.py` tạo được lượt trúng.
 - **Một máy:** Kafka 1 broker (replication 1), MongoDB standalone, Spark `local[*]`, Hadoop 1 DataNode (replication 1),
-  không có restart policy hay supervisor (khi MongoDB dừng, job streaming dừng theo và phải chạy lại bằng tay): mỗi
+  Compose tự khởi động lại các service; query streaming thử kết nối lại từ checkpoint sau lỗi. Đây không phải HA: mỗi
   thành phần là một điểm lỗi đơn. Spark đọc ổ đĩa local, không đọc HDFS: `local[*]` là một JVM trên một máy, nên HDFS
   1 DataNode chỉ thêm độ trễ RPC. Lên cluster không chỉ đổi đường dẫn: logic xử lý (DataFrame, SQL, ALS) giữ nguyên,
   nhưng phải sửa lớp cấu hình (`common/settings.py` dùng pathlib, biến `hdfs://` thành `hdfs:/`, nên phải đổi sang
   chuỗi URI; đặt `SPARK_MASTER`; checkpoint lên HDFS/S3; gửi `common/` bằng `--py-files`; `spark.sql.shuffle.partitions`
   = 8 và driver 4 GB là giá trị cho laptop, đổi qua `SPARK_SHUFFLE_PARTITIONS`, `SPARK_DRIVER_MEMORY`; gói
   `spark-sql-kafka` đang tải từ Maven lúc chạy nên phải đóng sẵn vào image) và viết lại vài đoạn I/O (`has_parquet()`
-  trong `clean.py`, phần ghi MongoDB của `valid` và `trending` sang executor). Thiết kế cluster nằm trong báo cáo.
+  trong `clean.py` và chuyển phần ghi MongoDB của streaming từ driver sang executor). Thiết kế cluster nằm trong báo cáo.
 - **Chưa có bảo mật:** cổng MongoDB (27017) và Kafka (9094) mở ra máy host, MongoDB không xác thực, Kafka PLAINTEXT;
   chỉ chấp nhận được trên laptop. Sự kiện lỗi chỉ được đếm, không lưu (chưa có dead-letter topic).
-- **Chia train/test ngẫu nhiên** vì CSV không có thời điểm chấm (seed 42: 4.780.968 / 1.195.511 dòng; rating từ
-  streaming luôn vào train). Nếu dùng dữ liệu UCSD bản JSON có ngày tháng, nên đổi sang chia theo thời gian (train trước
-  một mốc, test sau mốc). Khi có thêm rating từ streaming, cách chia của `randomSplit` xáo lại một phần tập test của CSV,
-  nên Precision@10 dao động nhẹ giữa các lần (thử 10/11: 0,201–0,208); chia theo hash của (user, sách) sẽ ổn định hơn.
+- **Chia train/test seeded per-user** vì CSV không có thời điểm chấm; user có một positive rating ở lại train, mọi
+  rating stream ở train. Khi input đổi, random holdout của các cặp CSV có thể đổi; nếu dùng UCSD timestamps nên đánh giá
+  thêm temporal split. Không dùng các metric lịch sử làm kết quả cho cấu hình hiện tại.
+- **Đích cluster/cloud (thiết kế, chưa triển khai):** Spark batch trên YARN hoặc dịch vụ Spark quản lý; Parquet, archive
+  và checkpoint trên HDFS/object storage; streaming chạy thường trực; Kafka ít nhất 3 broker với replication 3;
+  MongoDB replica set; secrets/TLS và giám sát lag/độ trễ. Cần chuyển `pathlib` sang URI-compatible paths, đưa
+  checkpoint lên storage dùng chung, đóng gói connector Kafka, cấu hình executor và chuyển ghi streaming từ driver
+  sang executor trước khi chạy phân tán.
+- **MongoDB hay Cassandra:** workload hiện tại chủ yếu đọc top-30 và fallback theo một `user_id`, thay toàn bộ kết quả
+  theo từng user; MongoDB document `_id=user_id` khớp trực tiếp và thuận tiện khi gắn metadata. Cassandra cũng đáp ứng
+  point read/write nếu partition key là `user_id`, nhưng cần schema/denormalization theo query và quản lý phiên bản
+  recommendation rõ ràng hơn. Không có lựa chọn CAP tuyệt đối: replica set MongoDB với majority ưu tiên consistency
+  và có thể từ chối ghi khi mất majority; Cassandra cho phép chọn consistency level, cân bằng availability/consistency
+  theo thao tác. So sánh này là thiết kế theo access pattern, chưa phải benchmark; cấu hình hiện tại là MongoDB
+  standalone một node nên chưa kiểm chứng CAP hay HA.
 
 ## 7. Dừng và làm lại từ đầu
 
@@ -333,16 +491,22 @@ docker compose exec spark python -m unittest discover -s tests -t . -v      # t�
 | File | Kiểm tra |
 |---|---|
 | `tests/test_mapreduce.py` | mapper loại đúng từng loại dòng lỗi; combiner chạy 0/1/nhiều lần cho cùng kết quả; điểm TB chỉ làm tròn một lần |
-| `tests/test_recs.py` | không gợi ý sách đã đọc; xếp hạng top-k đúng; rating từ streaming luôn nằm trong tập train (2 test) |
-| `tests/test_stream_progress.py` | file tiến độ streaming cộng đúng mỗi batch một lần dù đọc lại nhiều lần; `AlreadyAppliedTest` (3 test): bỏ qua batch đã ghi, dừng với lỗi khi batch id nhỏ hơn `last_batch` |
+| `tests/test_recs.py` | không gợi ý sách đã chấm; chia test theo user; chỉ rating >= ngưỡng vào tập tín hiệu, rating stream vẫn ở train |
+| `tests/test_foldin.py` | giải normal equation implicit ALS và xử lý rating sách ngoài item factors |
+| `tests/test_recommendation_worker.py` | một rating tích cực đã biết đủ để fold-in; worker claim job theo thứ tự tạo |
+| `tests/test_stream_progress.py` | gộp rating trùng user–sách theo event time, file tiến độ cộng batch đúng một lần, checkpoint lệch thì báo lỗi |
 
-13/13 test đều qua (chạy trong container `spark`; trên máy host chỉ chạy được `test_mapreduce` vì thiếu pyspark/pymongo).
+Chạy toàn bộ suite trong container `spark` để xác nhận kết quả trên cấu hình hiện tại.
 
 Ngoài unit test, mỗi thành phần có kiểm chứng trên dữ liệu thật: `mapreduce/verify_with_spark.py` (MapReduce so với Spark SQL),
 `scripts/kafka_audit.py` (đếm Kafka và so với số đếm streaming trong MongoDB, khối `mongo_check`),
 `scripts/nosql_evidence.py` (đọc lại MongoDB; kiểm tra gợi ý không chứa sách đã chấm). Cổng kiểm tra của
 `write_recs.py` được thử trên database riêng: `docker compose exec -e MONGO_DB=bookpulse_test spark python
 batch/write_recs.py --books data/goodbooks/books.csv` (`reports/superseded/write_recs_gate_test_20261108/`).
+
+Các phép thử fault dưới đây là số đo lưu từ lần chạy trước, không xác nhận cấu hình hiện tại; các phần kiểm tra
+`rating_stats` cũ không nhất thiết khớp semantics hiện hành. Không chạy lại các script reset nếu không chủ định xóa
+trạng thái streaming.
 
 Thử sự cố streaming (khoảng 3 phút, chạy từ `bookpulse/`): `bash scripts/stream_fault_test.sh`. Script reset streaming,
 chạy job + producer (1.500 sự kiện, 3% trễ sau 30 giây, seed 7), `kill -9` cả Python lẫn JVM sau 45 giây, 15 giây sau

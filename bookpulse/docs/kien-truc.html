@@ -108,15 +108,15 @@ table.ev td:first-child { font-weight: 600; white-space: nowrap; }
 
 <main>
   <header>
-    <span class="chip">Đã chạy và kiểm chứng · Goodbooks-10k · 11/2026</span>
+    <span class="chip">Sơ đồ theo source hiện tại · kết quả kiểm chứng xem docs/streaming.md</span>
     <h1>Kiến trúc BookPulse</h1>
-    <p class="lead">Hệ thống gợi ý sách BDA501 theo đúng code trong <code>bookpulse/</code>, tổ chức theo ý tưởng Lambda: lớp batch, lớp tốc độ, lớp phục vụ; chưa hợp nhất batch view và speed view thành một số liệu, app chỉ gộp lúc đọc (ẩn sách trong <code>user_seen</code>). Một máy, Docker: compose <code>bookpulse</code> (spark, kafka, mongo, app) và compose <code>bookpulse-hadoop</code> cho nhánh kiểm chứng MapReduce; hai bên chỉ nối qua thư mục chung <code>bookpulse/</code>. Lớp batch tạo gợi ý theo đợt; lớp tốc độ cập nhật số liệu trực tiếp và lưu sự kiện vào kho Parquet cho lần batch sau.</p>
+    <p class="lead">Hệ thống gợi ý sách BDA501 theo đúng code trong <code>bookpulse/</code>, tổ chức theo ý tưởng Lambda: batch huấn luyện item factors và tạo user profiles, streaming cập nhật rating, recommendation worker fold-in user vector; app đọc <code>recs_live</code> trước rồi batch view và vẫn ẩn sách trong <code>user_seen</code>. Một máy, Docker: compose <code>bookpulse</code> (spark, kafka, mongo, app, recommendation-worker) và compose <code>bookpulse-hadoop</code> cho nhánh kiểm chứng MapReduce; hai bên chỉ nối qua thư mục chung <code>bookpulse/</code>. Item factors cố định tới batch train tiếp theo; mặc định một rating tích cực hợp lệ là đủ để thử fold-in; sách mới chờ batch.</p>
   </header>
-  <p class="lead">Sơ đồ tổng quan dùng khi thuyết trình: <a href="img/architecture_overview.png">img/architecture_overview.png</a> (slide 3); sơ đồ dưới đây là bản chi tiết (slide 17).</p>
+  <p class="lead">Sơ đồ tổng quan hiện tại: <a href="img/architecture_overview.svg">img/architecture_overview.svg</a>; sơ đồ dưới đây thể hiện luồng fold-in đang chạy.</p>
 
   <figure>
     <div class="scroll">
-      <svg class="arch" viewBox="0 0 1640 852" role="img" aria-label="Kiến trúc theo ý tưởng Lambda. Nguồn: Goodbooks-10k CSV và producer gửi sự kiện vào Kafka. Nhánh kiểm chứng: CSV lên HDFS, MapReduce trên YARN, kết quả đối chiếu với Spark SQL. Lớp batch trong container Spark: clean.py ghi Parquet, analytics_sql.py truy vấn, train_als.py huấn luyện ALS, write_recs.py ghi gợi ý vào collection mới rồi chuyển meta.active. Lớp tốc độ: stream_stats.py đọc Kafka mỗi 5 giây, ghi số liệu vào MongoDB và lưu sự kiện ra kho Parquet, kho này được gộp vào clean.py ở lần batch sau. Lớp phục vụ: MongoDB với batch view và speed view. App Streamlit đọc MongoDB, gộp hai view lúc đọc, và nút Chấm sao gửi sự kiện chấm sao vào Kafka.">
+      <svg class="arch" viewBox="0 0 1640 852" role="img" aria-label="Kiến trúc theo ý tưởng Lambda. Nguồn: Goodbooks-10k CSV và producer gửi sự kiện vào Kafka. Nhánh kiểm chứng: CSV lên HDFS, MapReduce trên YARN, kết quả đối chiếu với Spark SQL. Lớp batch trong container Spark: clean.py ghi Parquet, analytics_sql.py truy vấn, train_als.py huấn luyện ALS, write_recs.py ghi recommendation lists và versioned user_profiles rồi chuyển meta.active. Lớp tốc độ: stream_stats.py đọc Kafka mỗi 5 giây, ghi số liệu vào MongoDB, upsert user_ratings và recommendation_jobs, đồng thời lưu sự kiện ra Parquet. Worker gộp batch profile với stream overlay, fold-in user vector và ghi recs_live. App ưu tiên recs_live khớp model_version, rồi batch/popular.">
 <defs>
 <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
 <marker id="ahb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah b" d="M0,0 L10,5 L0,10 z"/></marker>
@@ -196,6 +196,7 @@ table.ev td:first-child { font-weight: 600; white-space: nowrap; }
 <rect class="box b" x="925" y="322" width="175" height="70" rx="7"/>
 <text class="t" x="1012.5" y="353.0" text-anchor="middle">write_recs.py</text>
 <text class="sub" x="1012.5" y="374.0" text-anchor="middle">top-30 + bù / user</text>
+<text class="sub" x="1012.5" y="387.0" text-anchor="middle">+ user profile / version</text>
 <path class="a b" d="M260,245 H308" marker-end="url(#ahb)"/>
 <rect class="badge b" x="270" y="234" width="30" height="21" rx="10"/>
 <text class="badge-t" x="285" y="250" text-anchor="middle">B1</text>
@@ -218,11 +219,12 @@ table.ev td:first-child { font-weight: 600; white-space: nowrap; }
 <text class="lbl" x="419.5" y="306">lần batch sau</text>
 <text class="layer st" x="425" y="440">LỚP TỐC ĐỘ (speed) · chạy liên tục · trigger 5 s</text>
 <rect class="box s" x="310" y="452" width="585" height="160" rx="7"/>
-<text class="t" x="326" y="480">stream_stats.py · Spark Structured Streaming · 4 query</text>
-<text class="sub2" x="326" y="508">• valid: watermark 10 phút + bỏ trùng event_id → thống kê, user_seen</text>
-<text class="sub2" x="326" y="533">• trending: cửa sổ 10 phút trượt 5 phút (update mode)</text>
-<text class="sub2" x="326" y="558">• rejected: đếm sự kiện lỗi · archive: lưu mọi sự kiện hợp lệ</text>
-<text class="sub2" x="326" y="583">• ≤ 20.000 offset/batch · ghi MongoDB bằng foreachBatch (driver)</text>
+<text class="t" x="326" y="480">stream_stats.py · Spark Structured Streaming · 3 query</text>
+<text class="sub2" x="326" y="508">• valid: watermark + bỏ trùng → user_seen, user_ratings, recommendation_jobs</text>
+<text class="sub2" x="326" y="533">• rating_stats: dựng từ rating mới nhất theo cặp user–sách</text>
+<text class="sub2" x="326" y="558">• rejected: đếm lỗi · archive: lưu sự kiện hợp lệ cho batch</text>
+<text class="sub2" x="326" y="583">• worker riêng: fold-in user trên item factors cố định → recs_live</text>
+<text class="sub2" x="326" y="607">• ≤ 20.000 offset/batch · foreachBatch ghi MongoDB tại driver</text>
 <path class="box " d="M925,491 a87.5,9 0 0 0 175,0 V593 a87.5,9 0 0 1 -175,0 Z"/>
 <ellipse class="box " cx="1012.5" cy="491" rx="87.5" ry="9"/>
 <text class="t" x="1012.5" y="522.5" text-anchor="middle">checkpoints/</text>
@@ -243,7 +245,7 @@ table.ev td:first-child { font-weight: 600; white-space: nowrap; }
 <rect class="ctr" x="1150" y="150" width="240" height="480" rx="11"/>
 <text class="ctr-label" x="1164" y="172">container mongo</text>
 <text class="ctr-label" x="1164" y="191">MongoDB 7.0 · :27017</text>
-<rect class="grp" x="1165" y="205" width="210" height="150" rx="7"/>
+<rect class="grp" x="1165" y="205" width="210" height="165" rx="7"/>
 <text class="layer bt" x="1177" y="226">BATCH VIEW</text>
 <rect class="box" x="1175" y="236" width="190" height="30" rx="4"/>
 <text class="m" x="1185" y="256">recommendations_&lt;v&gt;</text>
@@ -251,24 +253,33 @@ table.ev td:first-child { font-weight: 600; white-space: nowrap; }
 <text class="m" x="1185" y="293">meta {_id: active}</text>
 <rect class="box" x="1175" y="310" width="190" height="30" rx="4"/>
 <text class="m" x="1185" y="330">books</text>
+<rect class="box" x="1175" y="344" width="190" height="24" rx="4"/>
+<text class="m" x="1185" y="361">user_profiles_&lt;v&gt;</text>
 <rect class="grp" x="1165" y="372" width="210" height="244" rx="7"/>
 <text class="layer st" x="1177" y="393">SPEED VIEW</text>
-<rect class="box" x="1175" y="403" width="190" height="31" rx="4"/>
-<text class="m" x="1185" y="424">rating_stats</text>
-<rect class="box" x="1175" y="444" width="190" height="31" rx="4"/>
-<text class="m" x="1185" y="465">user_seen</text>
-<rect class="box" x="1175" y="485" width="190" height="31" rx="4"/>
-<text class="m" x="1185" y="506">trending (TTL 24 h)</text>
-<rect class="box" x="1175" y="526" width="190" height="31" rx="4"/>
-<text class="m" x="1185" y="547">online_eval</text>
-<rect class="box" x="1175" y="567" width="190" height="31" rx="4"/>
-<text class="m" x="1185" y="588">stream_state</text>
+<rect class="box" x="1175" y="401" width="190" height="24" rx="4"/>
+<text class="m" x="1185" y="418">rating_stats</text>
+<rect class="box" x="1175" y="430" width="190" height="24" rx="4"/>
+<text class="m" x="1185" y="447">user_seen</text>
+<rect class="box" x="1175" y="459" width="190" height="24" rx="4"/>
+<text class="m" x="1185" y="476">user_ratings</text>
+<rect class="box" x="1175" y="488" width="190" height="24" rx="4"/>
+<text class="m" x="1185" y="505">recommendation_jobs</text>
+<rect class="box" x="1175" y="517" width="190" height="24" rx="4"/>
+<text class="m" x="1185" y="534">recs_live (als-foldin)</text>
+<rect class="box" x="1175" y="546" width="190" height="24" rx="4"/>
+<text class="m" x="1185" y="563">stream_state</text>
+<rect class="box" x="1175" y="575" width="190" height="24" rx="4"/>
+<text class="m" x="1185" y="592">online_eval · stream</text>
 <path class="a b" d="M1100,357 H1135 V251 H1173" marker-end="url(#ahb)"/>
 <path class="a b" d="M1135,288 H1173" marker-end="url(#ahb)"/>
+<path class="a b" d="M1100,357 H1173" marker-end="url(#ahb)"/>
 <circle class="num" cx="1150" cy="251" r="10"/>
 <text class="num-t" x="1150" y="256" text-anchor="middle">1</text>
 <circle class="num" cx="1150" cy="288" r="10"/>
 <text class="num-t" x="1150" y="293" text-anchor="middle">2</text>
+<circle class="num" cx="1150" cy="357" r="10"/>
+<text class="num-t" x="1150" y="362" text-anchor="middle">3</text>
 <rect class="badge b" x="1097" y="369" width="30" height="21" rx="10"/>
 <text class="badge-t" x="1112" y="385" text-anchor="middle">B4</text>
 <rect class="box" x="1425" y="160" width="160" height="58" rx="7"/>
@@ -286,11 +297,11 @@ table.ev td:first-child { font-weight: 600; white-space: nowrap; }
 <path class="a r" d="M1375,494 H1400 V350 H1423" marker-end="url(#ahr)"/>
 <text class="lbl2" x="1420" y="424">Gộp lúc đọc:</text>
 <path class="a s" d="M1585,330 H1620 V648 H140 V622" marker-end="url(#ahs)"/>
-<text class="lbl" x="300" y="668">nút Chấm sao trong app: gửi sự kiện chấm sao vào Kafka (app không ghi MongoDB)</text>
+<text class="lbl" x="300" y="668">trang Điều khiển demo phát sự kiện mô phỏng vào Kafka</text>
 <text class="sub" x="1420" y="448">• gợi ý batch, ẩn</text>
 <text class="sub" x="1420" y="470">  sách trong user_seen</text>
-<text class="sub" x="1420" y="492">• điểm TB, sách hot</text>
-<text class="sub" x="1420" y="514">  từ speed view</text>
+<text class="sub" x="1420" y="492">• trạng thái rating</text>
+<text class="sub" x="1420" y="514">  và gợi ý live</text>
 <text class="sub" x="1420" y="536">• user mới: sách</text>
 <text class="sub" x="1420" y="558">  phổ biến (meta)</text>
 <line class="a m" x1="20" y1="692" x2="54" y2="692"/>
@@ -308,25 +319,94 @@ table.ev td:first-child { font-weight: 600; white-space: nowrap; }
 <rect class="badge b" x="1167.3999999999999" y="682" width="16" height="20" rx="8"/><rect class="badge s" x="1185.3999999999999" y="682" width="16" height="20" rx="8"/>
 <text class="leg" x="1211.3999999999999" y="697">bước batch / stream</text>
 <text class="note" x="20" y="730">①  write_recs ghi gợi ý vào collection mới   ②  xong hết mới chuyển meta.active (giữ 2 bản)  →  app không bao giờ đọc danh sách ghi dở</text>
-<text class="note" x="20" y="756">Một máy host, Docker: compose bookpulse (spark · kafka · mongo · app) + compose bookpulse-hadoop; hai bên chỉ nối qua thư mục chung bookpulse/</text>
-<text class="note" x="20" y="782">Đọc phụ: stream_stats đọc meta + top-10 để tính online_eval · rate_from_recs (dòng lệnh) đọc top-10 rồi gửi sự kiện vào Kafka (demo)</text>
+<text class="note" x="20" y="756">Một máy host, Docker: compose bookpulse (spark · kafka · mongo · app · worker) + compose bookpulse-hadoop; nối qua thư mục chung bookpulse/</text>
+<text class="note" x="20" y="782">Đọc phụ: online_eval là sanity check · worker chỉ fold-in khi đủ rating tích cực · user mới / sách mới chờ batch train</text>
 <text class="note" x="20" y="808">books.csv → analytics_sql.py và write_recs.py (collection books) · verify_with_spark đọc lại ratings.csv để đối chiếu</text>
 </svg>
     </div>
   </figure>
 
   <section class="card">
+    <h2>Luồng thể loại và giao diện người dùng</h2>
+    <p class="lead">Luồng metadata sách chạy trước khi phục vụ; không gọi Google Books theo mỗi lần mở app. Giao diện đọc thể loại từ CSV/MongoDB, còn rating luôn đi qua Kafka và worker trước khi thành gợi ý live.</p>
+    <figure>
+      <div class="scroll">
+        <svg class="arch-extra" viewBox="0 0 1480 360" role="img" aria-label="Goodbooks books.csv, book_tags.csv và tags.csv được scripts/update_book_genres.py chuẩn hóa; kết quả thể loại được Streamlit dùng để lọc danh mục và gợi ý. Trang đọc hiển thị gợi ý và lịch sử sách đã xem; trang Điều khiển demo phát sự kiện mô phỏng vào Kafka để Spark và recommendation worker cập nhật recs_live.">
+          <defs>
+            <marker id="ah-extra-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah b" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="ah-extra-s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah s" d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+          <text class="layer bt" x="20" y="28">CATALOG / GENRE · XỬ LÝ TRƯỚC</text>
+          <rect class="box b" x="20" y="48" width="230" height="100" rx="8"/>
+          <text class="t" x="135" y="76" text-anchor="middle">Goodbooks-10k</text>
+          <text class="sub" x="135" y="101" text-anchor="middle">books.csv · book_tags.csv</text>
+          <text class="sub" x="135" y="123" text-anchor="middle">tags.csv · giữ nguyên book_id</text>
+          <rect class="box d" x="20" y="174" width="230" height="74" rx="8"/>
+          <text class="t" x="135" y="202" text-anchor="middle">Google Books API</text>
+          <text class="sub" x="135" y="226" text-anchor="middle">tùy chọn · chỉ bổ sung sách thiếu</text>
+          <rect class="box b" x="300" y="78" width="260" height="118" rx="8"/>
+          <text class="t" x="430" y="108" text-anchor="middle">update_book_genres.py</text>
+          <text class="sub" x="430" y="134" text-anchor="middle">map tag → genre chuẩn</text>
+          <text class="sub" x="430" y="158" text-anchor="middle">giữ original_tags · chạy lại an toàn</text>
+          <path class="a b" d="M250,98 H298" marker-end="url(#ah-extra-b)"/>
+          <path class="a r" d="M250,210 H275 V158 H298" marker-end="url(#ahr)"/>
+          <rect class="box" x="610" y="48" width="250" height="100" rx="8"/>
+          <text class="t" x="735" y="78" text-anchor="middle">books_with_genres.csv</text>
+          <text class="sub" x="735" y="103" text-anchor="middle">genres · original_tags</text>
+          <text class="sub" x="735" y="126" text-anchor="middle">Unknown nếu không đủ căn cứ</text>
+          <rect class="box" x="610" y="174" width="250" height="74" rx="8"/>
+          <text class="t" x="735" y="203" text-anchor="middle">MongoDB · books</text>
+          <text class="sub" x="735" y="227" text-anchor="middle">upsert trường genre, giữ metadata</text>
+          <path class="a b" d="M560,110 H608" marker-end="url(#ah-extra-b)"/>
+          <path class="a b" d="M560,166 H585 V210 H608" marker-end="url(#ah-extra-b)"/>
+          <rect class="box" x="915" y="78" width="250" height="118" rx="8"/>
+          <text class="t" x="1040" y="108" text-anchor="middle">Streamlit · bookstore.py</text>
+          <text class="sub" x="1040" y="134" text-anchor="middle">genre badges + tìm/lọc nhiều genre</text>
+          <text class="sub" x="1040" y="158" text-anchor="middle">genre trên sách khám phá / gợi ý</text>
+          <path class="a r" d="M860,98 H913" marker-end="url(#ahr)"/>
+          <path class="a r" d="M860,210 H885 V176 H913" marker-end="url(#ahr)"/>
+          <text class="layer st" x="20" y="286">RATING / RECOMMENDATION · THỜI GIAN THỰC</text>
+          <rect class="box s" x="20" y="300" width="250" height="48" rx="8"/>
+          <text class="t" x="145" y="330" text-anchor="middle">5 sao → xác nhận trong app</text>
+          <rect class="box s" x="340" y="300" width="220" height="48" rx="8"/>
+          <text class="t" x="450" y="330" text-anchor="middle">Kafka · rating-events</text>
+          <rect class="box s" x="630" y="300" width="260" height="48" rx="8"/>
+          <text class="t" x="760" y="330" text-anchor="middle">Spark Streaming → MongoDB</text>
+          <rect class="box s" x="960" y="300" width="240" height="48" rx="8"/>
+          <text class="t" x="1080" y="330" text-anchor="middle">worker fold-in → recs_live</text>
+          <rect class="box" x="1270" y="48" width="190" height="150" rx="8"/>
+          <text class="t" x="1365" y="78" text-anchor="middle">Các tab trong app</text>
+          <text class="sub" x="1365" y="104" text-anchor="middle">Khám phá · 50 sách</text>
+          <text class="sub" x="1365" y="128" text-anchor="middle">Dành cho bạn · top 10</text>
+          <text class="sub" x="1365" y="152" text-anchor="middle">Sách đã chấm</text>
+          <text class="sub" x="1365" y="176" text-anchor="middle">ID tùy chỉnh / phiên khách</text>
+          <path class="a s" d="M270,324 H338" marker-end="url(#ah-extra-s)"/>
+          <path class="a s" d="M560,324 H628" marker-end="url(#ah-extra-s)"/>
+          <path class="a s" d="M890,324 H958" marker-end="url(#ah-extra-s)"/>
+          <path class="a s" d="M1200,324 H1235 V176 H1268" marker-end="url(#ah-extra-s)"/>
+          <path class="a r" d="M1165,120 H1268" marker-end="url(#ahr)"/>
+          <text class="note" x="610" y="270">Cập nhật genre theo lệnh; giao diện chỉ đọc dữ liệu đã lưu.</text>
+        </svg>
+      </div>
+      <figcaption>Genre là metadata để hiển thị/lọc, không tham gia tính ALS. Rating dưới ngưỡng vẫn được lưu để ẩn sách nhưng không làm thay đổi vector user.</figcaption>
+    </figure>
+  </section>
+
+  <section class="card">
     <h2>Thành phần, file và bằng chứng</h2>
+    <p class="lead">Mô tả dưới đây là chức năng được triển khai. File evidence là kết quả đã lưu, không tự xác nhận working tree hiện tại; trạng thái theo ngày chạy được ghi tại <a href="streaming.md">bảng trạng thái streaming</a> và trong tên từng report.</p>
     <div class="tbl-wrap">
     <table class="ev">
-      <tr><th>Thành phần</th><th>File</th><th>Đã kiểm chứng</th><th>Bằng chứng</th></tr>
+      <tr><th>Thành phần</th><th>File</th><th>Thiết kế / chức năng hiện tại</th><th>Trạng thái bằng chứng</th></tr>
       <tr><td>MapReduce</td><td><code>mapreduce/</code></td><td>5.976.479 dòng trên HDFS + YARN; combiner giảm 99,2% dữ liệu shuffle; khớp Spark SQL (<code>exceptAll</code> hai chiều = 0)</td><td><code>reports/mapreduce_verify_*.json</code>, <code>reports/mapreduce/</code></td></tr>
       <tr><td>Làm sạch → Parquet</td><td><code>batch/clean.py</code></td><td>Loại đúng dòng lỗi/trùng trên dữ liệu mẫu; gộp sự kiện streaming, bỏ trùng theo <code>event_id</code></td><td><code>reports/clean_*.json</code></td></tr>
       <tr><td>Spark SQL</td><td><code>batch/analytics_sql.py</code></td><td>Temp view, 6 câu hỏi; SQL = DataFrame API; BroadcastHashJoin: một <code>Exchange</code> shuffle + một <code>BroadcastExchange</code> (bảng sách nhỏ); Parquet nhanh hơn CSV 3,9–8,4 lần (dao động theo bộ nhớ đệm; lần chạy cuối 4,22 s so với 1,08 s = 3,9 lần)</td><td><code>reports/analytics_sql_*.json</code>, <code>sql_plan_*.txt</code></td></tr>
-      <tr><td>Spark ML</td><td><code>batch/train_als.py</code></td><td>ALS implicit P@10 0,204 (sách phổ biến 0,078; explicit 0,008); chọn tham số trên validation</td><td><code>reports/train_als*.json</code>, <a href="chon-mo-hinh.md">chon-mo-hinh.md</a></td></tr>
-      <tr><td>NoSQL (MongoDB)</td><td><code>batch/write_recs.py</code></td><td>53.424 document; đọc theo <code>_id</code> (IDHACK, 1 document); đổi phiên bản an toàn cho collection gợi ý: cổng kiểm tra đủ số người dùng trước khi chuyển, <code>books</code> upsert trước khi chuyển, giữ phiên bản trước (<code>previous_collection</code>) để quay lại (đã sửa 08/11, thử trên database riêng <code>bookpulse_test</code>); còn lại: cổng không so chất lượng, mô hình và Parquet không có phiên bản; gợi ý và danh sách bù không chứa sách đã chấm (kiểm tra độc lập: 0 / 1.602.720 và 0 / 534.240 cặp)</td><td><code>reports/nosql_evidence_*.json</code>, <code>write_recs_*.json</code></td></tr>
-      <tr><td>Streaming</td><td><code>streaming/</code></td><td>Khớp Kafka sau <code>kill -9</code>: 1.474 = 1.500 − 26 trễ, 0 mất, 0 trùng (<code>scripts/stream_fault_test.sh</code>); 26 sự kiện trễ bị loại (suy từ kafka_audit: 1.474 = 1.500 − 26; file progress chỉ ghi 0 + 23 vì batch commit ngay trước <code>kill -9</code> không nằm trong file nào); cửa sổ trượt đếm đúng (2 × 1.474). Lặp lại lần 2, thêm kiểm tra kho Parquet qua <code>_spark_metadata</code>: 1.475 = 1.500 − 25, kho 1.537 dòng = 1.537 message hợp lệ, 1.500 <code>event_id</code>, exactly-once. Thử ngắt Kafka 40 s và MongoDB 30 s (<code>scripts/stream_outage_test.sh</code>): 3.000 = 3.000, kho 3.059 = 3.059, 0 mất, 0 trùng; lượt đầu tìm ra producer mất 571 message (kafka-python hủy bản ghi chờ trong buffer quá <code>request_timeout_ms</code> 30 giây, không có callback kiểm tra), đã sửa bằng <code>request_timeout_ms</code> 120 giây, retry và callback đếm <code>failed</code>. Kết quả đo, không phải bảo đảm: <code>failOnDataLoss=false</code>; <code>kill -9</code> ở thời điểm bất kỳ gần như chắc chắn không thử tới khe hở cộng lặp (chú thích (*) ở hình dưới)</td><td><code>reports/kafka_audit_20261107_220738.json</code>, <code>kafka_audit_20261108_040236.json</code>, <code>kafka_audit_20261108_041203.json</code>, <code>stream_progress_*.json</code>, <code>reports/streaming/</code>, <a href="streaming.md">streaming.md</a></td></tr>
-      <tr><td>App</td><td><code>app/app.py</code></td><td>Top-10 có bù, "Điểm TB (stream)", "sách đang hot", "Lượt 4–5 sao trúng top-10" (trúng / tổng); mục "Chấm sao": chọn sách trong top-10 và số sao, app gửi sự kiện vào Kafka (không ghi MongoDB); sau một trigger sách vừa chấm bị ẩn (dòng lệnh tương đương: <code>rate_from_recs.py</code>)</td><td><code>reports/streaming/app_trending.png</code>, <code>docs/img/app_after_rate_from_recs.png</code></td></tr>
+      <tr><td>Spark ML</td><td><code>batch/train_als.py</code></td><td>Chỉ rating >= ngưỡng (mặc định 4) là tín hiệu thích; test giữ lại theo user. Item factors và manifest có phiên bản. Số 0,204 trong report cũ là lịch sử, không đại diện cho cấu hình hiện tại.</td><td><code>reports/train_als*.json</code>, <code>reports/foldin_eval_*.json</code></td></tr>
+      <tr><td>NoSQL (MongoDB)</td><td><code>batch/write_recs.py</code>, <code>streaming/stream_stats.py</code></td><td>Recommendation và versioned <code>user_profiles</code> được kiểm tra đủ trước khi chuyển <code>meta.active</code>; <code>user_ratings</code> unique theo user/sách; một job pending/user; <code>recs_live</code> thay bản batch cho user đủ rating. Khi đổi model, live recs cũ được đánh dấu stale, không bị xóa.</td><td><code>reports/nosql_evidence_*.json</code>, <code>write_recs_*.json</code></td></tr>
+      <tr><td>Recommendation worker</td><td><code>streaming/recommendation_worker.py</code></td><td>Job atomic claim có token, debounce, retry/timeout; fold-in kết hợp lịch sử batch với stream overlay, dùng alpha/regParam của model active; nếu model đổi trong lúc xử lý thì job được xếp lại.</td><td>✓ pytest: 54 passed; trace: <code>reports/foldin_diagnostic_20261116_091506.json</code>; offline: <code>reports/foldin_eval_20261116_092620.json</code></td></tr>
+      <tr><td>Streaming</td><td><code>streaming/</code></td><td>3 Structured Streaming query xử lý watermark, archive và dữ liệu hợp lệ; worker fold-in nhận job, rating thấp chỉ ẩn sách. <code>event_time</code> do producer gán, <code>ingested_at</code> do Spark ghi. Các số đo hiện tại được phân loại trong báo cáo bằng chứng.</td><td><code>reports/stream_progress_*.json</code>, <a href="streaming.md">streaming.md</a></td></tr>
+      <tr><td>Thể loại sách</td><td><code>scripts/update_book_genres.py</code></td><td>Chuẩn hóa tags GoodReads, có thể bổ sung Google Books theo lệnh; xuất CSV và upsert genres vào <code>books</code>. Không chạy API khi mở app.</td><td><code>reports/book_genres_*.json</code></td></tr>
+      <tr><td>App</td><td><code>app/app.py</code>, <code>app/bookstore.py</code>, <code>app/setting.py</code></td><td>Trang đọc chọn user, chuyển giữa Gợi ý, Khám phá, Sách đã xem và có bộ sao không số dưới mỗi thẻ sách. Rating gửi vào Kafka; modal khóa thao tác khi đang chờ ingest và worker fold-in. Trang Điều khiển demo quản lý streaming, phát sự kiện mô phỏng và kiểm chứng.</td><td><a href="streaming.md">streaming.md</a></td></tr>
     </table>
     </div>
   </section>
@@ -336,7 +416,7 @@ table.ev td:first-child { font-weight: 600; white-space: nowrap; }
 
   <figure>
     <div class="scroll">
-      <svg viewBox="0 0 1250 630" role="img" aria-label="Ba sự kiện vào Kafka partition 1. Kafka lưu cả ba mà không kiểm tra. Spark ghi khoảng offset của batch vào offsets/ trong checkpoint trước khi chạy, loại sự kiện lỗi ở bước kiểm tra, bỏ bản trùng ở bước bỏ trùng; e1 được tính một lần vào rating_stats, user_seen và online_eval, được đếm trong 2 cửa sổ trending, còn kho archive giữ cả hai bản e1. Xong batch, Spark ghi commits/, chỉ là dấu batch đã xong, không chứa offset. Khi khởi động lại, batch chưa commit được chạy lại với cùng offset, và batch đã ghi MongoDB được bỏ qua nhờ last_batch.">
+      <svg viewBox="0 0 1250 630" role="img" aria-label="Ba sự kiện vào Kafka partition 1. Kafka lưu cả ba mà không kiểm tra. Spark ghi khoảng offset của batch vào offsets/ trong checkpoint trước khi chạy, loại sự kiện lỗi ở bước kiểm tra, bỏ bản trùng ở bước bỏ trùng; e1 được tính một lần vào trạng thái rating theo cặp, còn kho archive giữ mọi bản sao hợp lệ. Xong batch, Spark ghi commits/, chỉ là dấu batch đã xong, không chứa offset. Khi khởi động lại, batch chưa commit được chạy lại với cùng offset.">
         <defs>
           <marker id="h2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
           <marker id="h2s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah s" d="M0,0 L10,5 L0,10 z"/></marker>
@@ -457,7 +537,7 @@ table.ev td:first-child { font-weight: 600; white-space: nowrap; }
 
         <!-- Other branches of the same micro-batch -->
         <text class="lbl" x="510" y="458">Cùng micro-batch, các nhánh khác:</text>
-        <text class="sub" x="510" y="477">• trending: e1 được đếm trong 2 cửa sổ (10 phút, trượt 5)</text>
+        <text class="sub" x="510" y="477">• rating mới nhất được upsert theo cặp user–sách</text>
         <text class="sub" x="510" y="495">• archive: kho Parquet giữ cả 2 bản e1 (không bỏ trùng);</text>
         <text class="sub" x="510" y="511">  clean.py bỏ trùng theo event_id ở lần batch sau</text>
 
@@ -519,8 +599,8 @@ table.ev td:first-child { font-weight: 600; white-space: nowrap; }
       <span class="key"><svg viewBox="0 0 36 10"><rect x="1" y="1" width="34" height="8" rx="2" class="box s"/></svg>sự kiện hợp lệ</span>
       <span class="key"><svg viewBox="0 0 36 10"><rect x="1" y="1" width="34" height="8" rx="2" class="box d"/></svg>bản gửi trùng</span>
       <span class="key"><svg viewBox="0 0 36 10"><rect x="1" y="1" width="34" height="8" rx="2" class="box x"/></svg>sự kiện lỗi</span>
-      <span>Kafka giữ nguyên cả ba sự kiện. Spark loại e2 ở bước 3, bỏ bản sao e1 ở bước 4: e1 chỉ được tính một lần vào <code>rating_stats</code>, <code>user_seen</code>, <code>online_eval</code> và được đếm trong 2 cửa sổ <code>trending</code>. Kho archive (Parquet) không bỏ trùng nên giữ cả hai bản e1; <code>clean.py</code> bỏ trùng theo <code>event_id</code> ở lần batch sau. Checkpoint: <code>offsets/N</code> ghi khoảng offset của batch N trước khi chạy (write-ahead log); <code>commits/N</code> ghi sau khi xong và chỉ là dấu "batch N đã xong" (chứa <code>nextBatchWatermarkMs</code>, không chứa offset); trạng thái bỏ trùng và cửa sổ ở <code>state/</code>. Batch có trong <code>offsets/</code> mà chưa có trong <code>commits/</code> được chạy lại với cùng batch id và cùng offset.</span>
-      <span>(*) Còn một khe hở: nếu job chết đúng lúc đang ghi MongoDB (<code>rating_stats</code> và <code>online_eval</code> cộng dồn trước khi ghi <code>last_batch</code>), batch phát lại có thể cộng lặp một phần. Cách sửa chưa làm: chặn theo từng document, lọc <code>{_id: book, last_batch: {$lt: batch_id}}</code> rồi <code>$inc</code> cùng <code>$set last_batch</code> (MongoDB nguyên tử trên một document, không cần transaction). Hai lượt <code>kill -9</code> và lượt ngắt Kafka/MongoDB đã thử: 0 mất, 0 trùng, nhưng khe này chỉ dài vài mili giây nên <code>kill -9</code> ở giây thứ 45 gần như chắc chắn không rơi vào nó; muốn thử cần chèn lỗi ngay sau <code>bulk_write</code>. Đã sửa (08/11): nếu batch id nhỏ hơn <code>last_batch</code> (checkpoint bị xóa nhưng MongoDB còn), job dừng với lỗi thay vì âm thầm bỏ qua các batch đó.</span>
+      <span>Kafka giữ nguyên cả ba sự kiện. Spark loại e2 ở bước kiểm tra, bỏ bản sao e1 ở bước khử trùng lặp; trạng thái rating theo cặp chỉ nhận sự kiện mới nhất. Kho archive (Parquet) không bỏ trùng nên giữ cả hai bản e1; <code>clean.py</code> bỏ trùng theo <code>event_id</code> ở lần batch sau. Checkpoint: <code>offsets/N</code> ghi khoảng offset của batch N trước khi chạy; <code>commits/N</code> ghi sau khi xong, chỉ là dấu "batch N đã xong"; trạng thái bỏ trùng ở <code>state/</code>. Batch có trong <code>offsets/</code> mà chưa có trong <code>commits/</code> được chạy lại với cùng batch id và cùng offset.</span>
+      <span>(*) Trạng thái rating hiện được ghi theo event time, còn <code>rating_stats</code> được dựng lại từ các cặp hiện hành; <code>online_eval</code> dùng batch id để bỏ qua lần áp dụng lặp. Đây là bảo vệ theo từng sink, không bảo đảm exactly-once đầu-cuối: Kafka retention, mất checkpoint hoặc lỗi ngoài các đường đi đã thử vẫn cần xử lý. Những lượt fault test bên trên là kết quả lịch sử, chưa chạy lại cho phiên bản hiện tại.</span>
     </figcaption>
   </figure>
 
@@ -531,11 +611,11 @@ table.ev td:first-child { font-weight: 600; white-space: nowrap; }
     </div>
     <div class="card s">
       <h3>Spark: kiểm tra và tính</h3>
-      <p>Luồng streaming: đọc theo offset (tối đa 20.000 bản ghi mỗi batch; mặc định mỗi partition Kafka một task đọc, phần có trạng thái chạy trên 8 shuffle partition), loại lỗi, bỏ trùng, cộng dồn điểm; query <code>valid</code> và <code>trending</code> gom micro-batch về driver rồi ghi MongoDB. Luồng batch: làm sạch dữ liệu, huấn luyện ALS, tính top-30 cho mỗi người.</p>
+      <p>Luồng streaming: đọc theo offset (tối đa 20.000 bản ghi mỗi batch; mặc định mỗi partition Kafka một task đọc, phần có trạng thái chạy trên 8 shuffle partition), loại lỗi, bỏ trùng và cập nhật trạng thái rating mới nhất; ghi MongoDB theo micro-batch trên driver. Luồng batch: làm sạch dữ liệu, huấn luyện ALS, tính top-30 cho mỗi người.</p>
     </div>
     <div class="card s">
       <h3>MongoDB: lưu kết quả để đọc nhanh</h3>
-      <p>Mỗi người dùng, mỗi cuốn sách là một document có <code>_id</code> cố định. Gợi ý của một người đọc bằng một lần tìm theo <code>_id</code> (cả 30 gợi ý + 10 sách bù), không phải tính lại; mỗi trang app còn đọc thêm <code>meta</code>, <code>user_seen</code>, <code>books</code>, <code>rating_stats</code>, <code>stream_state</code>, <code>online_eval</code>, <code>trending</code>.</p>
+      <p>Mỗi người dùng, mỗi cuốn sách là một document có <code>_id</code> cố định. Gợi ý của một người đọc bằng một lần tìm theo <code>_id</code> (cả 30 gợi ý + 10 sách bù), không phải tính lại; mỗi trang app còn đọc thêm <code>meta</code>, <code>user_seen</code>, <code>books</code>, <code>rating_stats</code>, <code>stream_state</code> và <code>online_eval</code>.</p>
     </div>
   </section>
 
@@ -554,21 +634,21 @@ table.ev td:first-child { font-weight: 600; white-space: nowrap; }
     <div class="card b">
       <h2>Luồng batch: thứ tự chạy</h2>
       <ol>
-        <li><code>python batch/clean.py</code><span>Ép kiểu, bỏ rating ngoài 1–5 và dòng trùng; gộp kho sự kiện streaming (bỏ trùng theo <code>event_id</code>, lấy rating có <code>event_time</code> mới nhất; chưa lọc sự kiện <code>simulated</code>); ghi Parquet. Kho này bị <code>reset_streaming.sh</code> xóa, nên mô hình cuối (P@10 0,204) được huấn luyện không có sự kiện streaming.</span></li>
+        <li><code>python batch/clean.py</code><span>Ép kiểu, bỏ rating ngoài 1–5; gộp archive streaming, bỏ trùng theo <code>event_id</code>, giữ rating mới nhất theo cặp; tùy chọn bỏ sự kiện <code>simulated</code>; ghi Parquet.</span></li>
         <li><code>python batch/analytics_sql.py --books data/goodbooks/books.csv --raw-csv data/goodbooks/ratings.csv</code><span>Câu hỏi phân tích bằng Spark SQL, query plan, so sánh CSV với Parquet.</span></li>
-        <li><code>python batch/train_als.py --implicit --ranks 20,50 --regs 0.1 --alphas 1,10</code><span>Chọn tham số theo Precision@10 (lưới tham số fit trên 80% của tập train, đánh giá trên 20% còn lại làm validation), rồi fit lại trên toàn bộ tập train (80% dữ liệu), đánh giá một lần trên test. Chạy thêm <code>train_als.py</code> không tham số để có RMSE và bản so sánh explicit.</span></li>
-        <li><code>python batch/write_recs.py --books data/goodbooks/books.csv</code><span>Top-30 sách chưa đọc + 10 sách bù cho mỗi người, sách phổ biến cho người dùng mới; ① ghi collection gợi ý mới, kiểm tra đủ số người dùng (thiếu thì xóa collection mới, job báo lỗi), upsert <code>books</code>, ② rồi mới chuyển <code>meta.active</code>; giữ phiên bản đang dùng và phiên bản trước (<code>previous_collection</code>) để quay lại. Mô hình và Parquet bị ghi đè tại chỗ; cổng không so chất lượng trước khi chuyển.</span></li>
+        <li><code>python batch/train_als.py --implicit --ranks 20,50 --regs 0.1 --alphas 1,10</code><span>Chỉ rating ≥ ngưỡng (mặc định 4) là tín hiệu thích; split seeded theo user; chọn tham số trên validation, đo test một lần. Lưu model version, item factors, <code>YtY</code>, <code>alpha</code> và <code>regParam</code>.</span></li>
+        <li><code>python batch/write_recs.py --books data/goodbooks/books.csv</code><span>Ghi top-30, fallback và <code>user_profiles</code> có positive ratings + toàn bộ sách đã chấm. Chỉ khi recommendations và profiles đủ số user mới chuyển <code>meta.active</code>; giữ bản active và previous. Artifact ALS có version; Parquet ratings được thay tại chỗ; chưa có quality gate trước khi chuyển.</span></li>
       </ol>
       <p class="sub" style="margin:12px 0 0;color:var(--muted);font-size:13px">Cả bốn bước: <code>bash scripts/run_pipeline.sh</code>. Không chạy luồng batch khi job streaming đang chạy: Spark UI thứ hai sang cổng 4041 (không mở ra host) và hai driver 4 GB vượt 7,7 GiB RAM của Docker.</p>
     </div>
     <div class="card s">
       <h2>Luồng streaming: hai terminal</h2>
       <ol>
-        <li><code>python streaming/stream_stats.py</code><span>Bốn query: valid, rejected, trending, events_to_parquet; ghi tiến độ ra <code>reports/stream_progress_*.json</code>.</span></li>
+        <li><code>python streaming/stream_stats.py</code><span>Ba query: valid, rejected, events_to_parquet; ghi tiến độ ra <code>reports/stream_progress_*.json</code>.</span></li>
         <li><code>python streaming/producer.py --limit 1000 --late 0.05</code><span>20 sự kiện/giây, có bản trùng, sự kiện lỗi; 5% số sự kiện gửi sau giây thứ 30 (khi job đã có watermark) là sự kiện trễ 30 phút, để thấy watermark loại chúng (lượt demo: 19/1.000).</span></li>
-        <li>App → mục "Chấm sao" (hoặc <code>python scripts/rate_from_recs.py --user 1 --n 2 --rating 5</code>)<span>User 1 chấm sách trong top-10 của mình; app chỉ gửi sự kiện vào Kafka; sau một trigger, job streaming ghi <code>user_seen</code>, app ẩn cuốn đó và đẩy cuốn tiếp theo lên.</span></li>
-        <li>Mở <code>localhost:8501</code> và <code>localhost:4040</code><span>App: "Điểm TB (stream)", "sách đang hot", lượt trúng top-10. Spark UI: tab Structured Streaming.</span></li>
-        <li><code>python scripts/kafka_audit.py</code><span>Đếm lại Kafka và đối chiếu MongoDB trong một lệnh: <code>no_loss_no_double_count</code>, <code>rejected_match</code>, <code>trending_match</code>; thêm <code>archive_check</code>: đếm kho Parquet qua <code>_spark_metadata</code> (số dòng = message hợp lệ, <code>event_id</code> khác nhau = hợp lệ khác nhau).</span></li>
+        <li>Producer / sự kiện mô phỏng → Kafka → streaming → worker fold-in<span>Streamlit trang đọc hiển thị danh mục và gợi ý; trang Điều khiển demo phát sự kiện mô phỏng để minh họa luồng. Khi MongoDB nhận trạng thái tương tác, app lọc sách đó khỏi gợi ý. Nếu streaming dừng hoặc sự kiện vượt watermark thì việc lọc chờ tới khi trạng thái được xử lý. Worker kết hợp profile batch + stream overlay; rating tích cực hợp lệ có thể tạo fold-in và ghi <code>recs_live</code>. Công cụ gửi rating theo sách còn dùng được qua CLI kiểm chứng.</span></li>
+        <li>Mở <code>localhost:8501</code> và <code>localhost:4040</code><span>App: top-10 gợi ý, genre và trạng thái/tiến độ cập nhật. Spark UI: tab Structured Streaming.</span></li>
+        <li><code>python scripts/kafka_audit.py</code><span>Đếm lại Kafka và đối chiếu trạng thái sự kiện, cặp rating hiện hành, lỗi và archive Parquet qua <code>_spark_metadata</code>.</span></li>
         <li><code>bash scripts/stream_fault_test.sh</code><span>Chạy trên máy host, khoảng 3 phút: <code>kill -9</code> job giữa chừng, chạy lại từ checkpoint, rồi đối chiếu Kafka.</span></li>
         <li><code>bash scripts/stream_outage_test.sh</code><span>Chạy trên máy host, khoảng 5 phút: dừng Kafka 40 giây rồi MongoDB 30 giây khi producer và job đang chạy; job dừng thì script thử nghiệm chạy lại từ cùng checkpoint (lượt 08/11: sau 11 giây); chưa có restart policy, ngoài thử nghiệm phải chạy lại bằng tay; log ở <code>reports/streaming/outage_test_&lt;thời điểm&gt;/</code>.</span></li>
       </ol>
@@ -583,13 +663,13 @@ table.ev td:first-child { font-weight: 600; white-space: nowrap; }
       <li>Thêm bước Spark SQL (temp view, câu hỏi phân tích, query plan) giữa làm sạch và huấn luyện.</li>
       <li>Mô hình dùng cho app là ALS implicit, chọn theo Precision@10; ALS explicit chỉ còn dùng để báo cáo RMSE (xem <a href="chon-mo-hinh.md">chon-mo-hinh.md</a>).</li>
       <li>Lưu top-30 và 10 sách bù cho mỗi người, nên app luôn hiện đủ 10 cuốn chưa đọc mà không phải huấn luyện lại.</li>
-      <li>Streaming có thêm cửa sổ event time ("sách đang hot"), kho lưu trữ sự kiện cho lần huấn luyện sau, file tiến độ, đã thử <code>kill -9</code> hai lần và thử ngắt Kafka, MongoDB (xem <a href="streaming.md">streaming.md</a>). Lượt ngắt Kafka đầu tiên tìm ra producer mất 571 message: kafka-python 2.0.2 hủy bản ghi chờ trong buffer quá <code>request_timeout_ms</code> (mặc định 30 giây) và không có callback kiểm tra; producer nay đặt <code>request_timeout_ms</code> 120 giây, <code>retries=10</code> và đếm bản ghi gửi thất bại (Kafka dừng lâu hơn khoảng 2 phút thì vẫn mất, nhưng được đếm).</li>
-      <li>Chưa làm: thống kê theo thể loại, đánh giá online có ý nghĩa (cần dữ liệu có thời gian thật), triển khai trên cluster thật.</li>
-      <li>Mọi thứ chạy trên một máy: Kafka 1 broker (replication 1), MongoDB standalone, Spark <code>local[*]</code>, Hadoop 1 DataNode (replication 1), không có restart policy hay supervisor (khi MongoDB dừng, job streaming dừng theo và phải chạy lại bằng tay), nên mỗi thành phần là một điểm lỗi đơn. Hai lớp không chạy cùng lúc được (hai driver 4 GB không vừa 7,7 GiB RAM): trong 25–35 phút chạy <code>run_pipeline.sh</code>, job streaming dừng, sự kiện chờ trong Kafka, app phục vụ gợi ý và speed view cũ; khi chạy lại, job đọc bù tối đa 20.000 offset mỗi batch. Chưa thử tải. Map task của Hadoop đều rack-local, không data-local, vì DataNode và NodeManager ở hai container riêng.</li>
+      <li>Streaming lưu trữ sự kiện cho lần huấn luyện sau và có báo cáo tiến độ; các bài thử <code>kill -9</code>, Kafka/MongoDB trong tài liệu là kết quả lịch sử, cần chạy lại để xác nhận phiên bản hiện tại (xem <a href="streaming.md">streaming.md</a>).</li>
+      <li>Genre được chuẩn hóa từ Goodreads tags và dùng để hiển thị/lọc; chưa dùng trong ALS. Đánh giá online còn giới hạn vì dữ liệu gốc không có thời gian thật; chưa triển khai trên cluster thật.</li>
+      <li>Mọi thứ chạy trên một máy: Kafka 1 broker (replication 1), MongoDB standalone, Spark <code>local[*]</code>, Hadoop 1 DataNode (replication 1); Compose có restart policy và query streaming thử kết nối lại từ checkpoint sau lỗi. Đây không phải HA: mỗi thành phần vẫn là điểm lỗi đơn. Hai lớp không chạy cùng lúc được (hai driver 4 GB không vừa 7,7 GiB RAM): trong 25–35 phút chạy <code>run_pipeline.sh</code>, job streaming dừng, sự kiện chờ trong Kafka; khi chạy lại, job đọc bù tối đa 20.000 offset mỗi batch. Chưa thử tải. Map task của Hadoop đều rack-local, không data-local, vì DataNode và NodeManager ở hai container riêng.</li>
       <li>Chưa có bảo mật: cổng MongoDB (27017) và Kafka (9094) mở ra máy host, MongoDB không xác thực, Kafka PLAINTEXT; chỉ chấp nhận được trên laptop.</li>
       <li>Kho sự kiện là file sink trigger 5 giây, không compaction, nên sinh nhiều file nhỏ. Sự kiện lỗi chỉ được đếm, không có dead-letter topic.</li>
-      <li>Theo ý tưởng Lambda nhưng chưa hợp nhất batch view và speed view thành một số liệu: <code>rating_stats</code> chỉ có rating từ streaming kể từ lần reset; thống kê theo sách của MapReduce / Spark SQL dùng để phân tích và đối chiếu; app chỉ gộp lúc đọc. Hai lớp không cho cùng kết quả: <code>clean.py</code> giữ một rating mới nhất cho mỗi cặp (user, book), lớp tốc độ đếm mọi <code>event_id</code> khác nhau (chấm lại bị tính hai lần trong <code>rating_stats</code>) và bỏ sự kiện trễ hơn watermark; vì vậy hai view không được cộng với nhau. Muốn hợp nhất cần một mốc cắt (ghi trong <code>meta</code> mốc mà batch đã hấp thụ, chỉ cộng speed view sau mốc), hiện chưa có; <code>rating_stats</code> và <code>user_seen</code> tăng tới khi reset. <code>user_seen</code> được ghi sau watermark, nên rating thật trễ hơn 10 phút không bị ẩn khỏi app cho tới lần batch sau. Không dùng Kappa vì log Kafka không phải nguồn gốc: 6 triệu rating lịch sử chưa từng đi qua Kafka, và Kafka chỉ giữ 7 ngày.</li>
-      <li>Lên cluster không chỉ là đổi đường dẫn: logic xử lý (DataFrame, SQL, ALS) giữ nguyên, nhưng phải sửa lớp cấu hình (đường dẫn thành chuỗi URI thay vì pathlib, đặt <code>SPARK_MASTER</code>, checkpoint lên HDFS/S3, <code>common/</code> gửi bằng <code>--py-files</code>, <code>spark.sql.shuffle.partitions</code> = 8 và driver 4 GB là giá trị cho laptop, gói <code>spark-sql-kafka</code> đang tải từ Maven lúc chạy nên phải đóng sẵn vào image) và viết lại vài đoạn I/O (<code>has_parquet()</code> trong <code>clean.py</code>, phần ghi MongoDB của <code>valid</code> và <code>trending</code> từ driver sang executor); xem mục 11 của báo cáo.</li>
+      <li>Theo ý tưởng Lambda nhưng chưa hợp nhất batch view và speed view thành một số liệu: <code>rating_stats</code> chỉ có rating streaming trong <code>user_ratings</code>, còn thống kê batch dùng cho phân tích; app kết hợp chúng khi cần. Sự kiện quá trễ watermark được giữ trong archive nhưng không cập nhật ngay user state; lần batch sau mới có thể hấp thụ. Không dùng Kappa vì log Kafka không phải nguồn gốc: rating lịch sử chưa từng đi qua Kafka và Kafka chỉ giữ dữ liệu hữu hạn.</li>
+      <li>Lên cluster không chỉ là đổi đường dẫn: logic xử lý (DataFrame, SQL, ALS) giữ nguyên, nhưng phải sửa lớp cấu hình, checkpoint lên HDFS/S3, gửi <code>common/</code> bằng <code>--py-files</code> và chuyển ghi MongoDB từ driver sang executor khi tải lớn; xem mục 11 của báo cáo.</li>
     </ul>
   </section>
 </main>

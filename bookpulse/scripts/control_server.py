@@ -39,10 +39,16 @@ def num(params, key, default, lo, hi, cast=int):
     return str(value)
 
 
+def reset_args(params):
+    if params.get("confirmed") is not True:
+        raise ValueError("confirm stream-data deletion in the app before resetting")
+    return [PY, "scripts/reset_streaming.py", "--yes"]
+
+
 # name -> function(params) -> argv. Nothing outside this table can be run.
 ACTIONS = {
     "start_stream": lambda p: [PY, STREAM_JOB],
-    "reset": lambda p: [PY, "scripts/reset_streaming.py"],
+    "reset": reset_args,
     "rate_recs": lambda p: [PY, "scripts/rate_from_recs.py", "--user", num(p, "user", 1, 1, 10**7),
                             "--n", num(p, "n", 2, 1, 10), "--rating", num(p, "rating", 5, 1, 5)],
     "late": lambda p: [PY, "streaming/producer.py", "--file", str(FAKE_CSV),

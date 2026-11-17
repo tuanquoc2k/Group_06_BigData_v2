@@ -1,14 +1,12 @@
 """Streaming job: Kafka rating events -> validate, de-duplicate -> MongoDB.
 
-Per micro-batch it writes three things:
-  rating_stats  live average rating and count per book
-  user_seen     books each user has just rated (the app hides them from the top-10)
-  online_eval   online hit rate: share of liked events (4-5 stars) whose book was in the user's top-10
+Per micro-batch it writes the newest rating for each user-book pair, the books users have seen,
+coalesced recommendation jobs, and online evaluation counters. rating_stats is derived from the
+current user_ratings state, so re-rating a book cannot inflate its count.
 
 Spark + Kafka + checkpoint gives at-least-once delivery, so a batch can be replayed after a restart.
-The last applied batch id is stored in MongoDB and a replayed batch is skipped, and inside a batch every
-rating_stats / online_eval document records the last batch it absorbed, so a crash in the middle of the
-writes cannot count part of a batch twice either (apply_valid_rows).
+The last applied batch id is stored in MongoDB. Rating state is applied with event-time ordering,
+rating_stats is recomputed from that state, and online_eval protects its event counters with a batch id.
 
 A third query archives every valid event to Parquet (data/parquet/stream_events, partitioned by
 event_date): stateless, no watermark, no de-duplication, so a rating that arrives late is NOT lost from
@@ -16,10 +14,6 @@ the training data. Spark's file sink records committed files in _spark_metadata,
 exactly-once. batch/clean.py removes duplicates exactly by event_id and merges the events into the
 training data, so the next retrain learns from ratings that arrived through the stream.
 (Speed layer drops late events to bound its state; batch layer keeps them: Lambda architecture.)
-
-A fourth query is a stateful event-time window: ratings per book in a 10-minute window sliding every
-5 minutes ("trending"), in update mode. Events older than the watermark are dropped by Spark before
-they reach any state, which the progress report shows as numRowsDroppedByWatermark.
 
 Scale note: process_valid collects each micro-batch to the driver and writes it with one MongoDB
 client. That is fine for this project's event rate; --max-offsets bounds how much one batch can pull
@@ -32,15 +26,25 @@ reports/stream_progress_<timestamp>.json every 10 seconds and when the job stops
 """
 import argparse
 import json
+import logging
+import os
+import platform
 import time
 from datetime import datetime, timezone
 
-from pymongo import ReplaceOne, UpdateOne
+from pymongo import UpdateOne
 from pyspark.sql import functions as F
 from pyspark.sql.types import BooleanType, IntegerType, StringType, StructField, StructType
 
-from common.settings import (CHECKPOINT_DIR, KAFKA_BOOTSTRAP, KAFKA_TOPIC, REPORT_DIR, STREAM_EVENTS_DIR,
-                             get_db, get_spark)
+from common.settings import (
+    ALS_MIN_RATING, CHECKPOINT_DIR, KAFKA_BOOTSTRAP, KAFKA_LOG_RETENTION_MS, KAFKA_TOPIC,
+    REPORT_DIR, STREAM_EVENTS_DIR, STREAM_MAX_OFFSETS, STREAM_PARTITIONS, STREAM_RESTART_SECONDS,
+    STREAM_TRIGGER, STREAM_WATERMARK, get_db, get_spark,
+)
+from common.mongo_indexes import ensure_indexes
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("bookpulse-stream")
 
 SCHEMA = StructType([
     StructField("event_id", StringType()),
@@ -48,6 +52,7 @@ SCHEMA = StructType([
     StructField("book_id", IntegerType()),
     StructField("rating", IntegerType()),
     StructField("event_time", StringType()),
+    StructField("ingested_at", StringType()),
     StructField("simulated", BooleanType()),
 ])
 TOP_K = 10
@@ -80,11 +85,66 @@ def mark_applied(db, key, batch_id, **inc):
     db.stream_state.update_one({"_id": key}, update, upsert=True)
 
 
+def latest_rating_update(row, ingested_at):
+    """Keep the latest event-time value for a (user, book), using ingestion time to break ties."""
+    event_time = row["event_time"]
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    incoming_time = {"$literal": event_time}
+    stored_time = {"$ifNull": ["$event_time", epoch]}
+    incoming_ingest = {"$literal": ingested_at}
+    stored_ingest = {"$ifNull": ["$ingested_at", epoch]}
+    incoming_id = {"$literal": row["event_id"]}
+    stored_id = {"$ifNull": ["$event_id", ""]}
+    is_newer = {"$or": [
+        {"$gt": [incoming_time, stored_time]},
+        {"$and": [{"$eq": [incoming_time, stored_time]},
+                  {"$gt": [incoming_ingest, stored_ingest]}]},
+        {"$and": [{"$eq": [incoming_time, stored_time]},
+                  {"$eq": [incoming_ingest, stored_ingest]},
+                  {"$gte": [incoming_id, stored_id]}]},
+    ]}
+    key = f"{row['user_id']}_{row['book_id']}"
+    return UpdateOne({"_id": key}, [{
+        "$set": {
+            "user_id": {"$literal": row["user_id"]},
+            "book_id": {"$literal": row["book_id"]},
+            "rating": {"$cond": [is_newer, {"$literal": row["rating"]}, "$rating"]},
+            "event_time": {"$cond": [is_newer, incoming_time, "$event_time"]},
+            "ingested_at": {"$cond": [is_newer, incoming_ingest, "$ingested_at"]},
+            "event_id": {"$cond": [is_newer, incoming_id, "$event_id"]},
+        },
+    }], upsert=True)
+
+
+def latest_rows_by_pair(rows):
+    """Keep one deterministic, newest event for each user-book pair in a micro-batch."""
+    latest = {}
+    for row in rows:
+        key = (int(row["user_id"]), int(row["book_id"]))
+        event_order = (row["event_time"], row["ingested_at"], row["event_id"])
+        current = latest.get(key)
+        if current is None or event_order > (
+                current["event_time"], current["ingested_at"], current["event_id"]):
+            latest[key] = row
+    return [latest[key] for key in sorted(latest)]
+
+
+def latest_event_by_user(rows):
+    """Return each user's newest event tuple for the coalesced worker job."""
+    latest = {}
+    for row in rows:
+        event = (row["event_time"], row["ingested_at"], row["event_id"])
+        user_id = int(row["user_id"])
+        if user_id not in latest or event > latest[user_id]:
+            latest[user_id] = event
+    return latest
+
+
 def update_online_eval(db, rows, batch_id):
     meta = db.meta.find_one({"_id": "active"})
     if meta is None:
         return
-    liked = [r for r in rows if r["rating"] >= 4]
+    liked = [r for r in rows if r["rating"] >= ALS_MIN_RATING]
     users = list({r["user_id"] for r in liked})
     top = {d["_id"]: {x["book_id"] for x in d["recs"]}
            for d in db[meta["recs_collection"]].find({"_id": {"$in": users}}, {"recs": {"$slice": TOP_K}})}
@@ -99,6 +159,35 @@ def update_online_eval(db, rows, batch_id):
          "$set": {"model_version": meta["model_version"], "updated": datetime.now(timezone.utc),
                   "last_batch": batch_id}},
     )
+
+
+def recompute_rating_stats(db, book_ids=None, batch_id=None):
+    match = {"book_id": {"$in": sorted(set(book_ids))}} if book_ids is not None else {}
+    if book_ids is not None and not match["book_id"]["$in"]:
+        return
+    if book_ids is None:
+        db.rating_stats.update_many({}, {"$set": {"stale": True}})
+    pipeline = [
+        {"$match": match} if match else {"$match": {"rating": {"$exists": True}}},
+        {"$group": {"_id": "$book_id", "rating_sum": {"$sum": "$rating"},
+                    "n_ratings": {"$sum": 1}}},
+    ]
+    now = datetime.now(timezone.utc)
+    operations = []
+    for row in db.user_ratings.aggregate(pipeline, allowDiskUse=True):
+        n_ratings = int(row["n_ratings"])
+        values = {
+            "rating_sum": int(row["rating_sum"]),
+            "n_ratings": n_ratings,
+            "avg_rating": float(row["rating_sum"]) / n_ratings,
+            "stale": False,
+            "updated": now,
+        }
+        if batch_id is not None:
+            values["last_batch"] = batch_id
+        operations.append(UpdateOne({"_id": int(row["_id"])}, {"$set": values}, upsert=True))
+    if operations:
+        db.rating_stats.bulk_write(operations, ordered=False)
 
 
 def ensure_topic(partitions):
@@ -121,39 +210,28 @@ def ensure_topic(partitions):
 def apply_valid_rows(db, rows, batch_id):
     """Write one micro-batch to the speed view so that writing the same batch twice changes nothing.
 
-    rating_stats and online_eval accumulate ($add / $inc), so every document remembers the last batch it
-    absorbed (last_batch) and the update is filtered on last_batch < batch_id: a batch replayed after a
-    crash in the middle of these writes only touches the documents it had not reached before. user_seen
-    is an upsert of the same values and idempotent by itself. MongoDB is atomic per document, so no
-    transaction is needed. (Before 15/11 the three writes ran before mark_applied with no such guard, so a
-    crash between them could count part of a batch twice.)
+    user_ratings keeps one newest event per user-book pair. rating_stats is recomputed from that
+    collection for touched books, so replaying a batch or rating a pair again cannot inflate counts.
     """
     if not rows:
         return
-    per_book = {}
-    for r in rows:
-        s, n = per_book.get(r["book_id"], (0, 0))
-        per_book[r["book_id"]] = (s + r["rating"], n + 1)
     now = datetime.now(timezone.utc)
-    not_yet_applied = {"$or": [{"last_batch": {"$lt": batch_id}}, {"last_batch": {"$exists": False}}]}
-    db.rating_stats.bulk_write([  # 1. make sure the documents exist (idempotent)
-        UpdateOne({"_id": book_id}, {"$setOnInsert": {"rating_sum": 0, "n_ratings": 0, "avg_rating": 0.0,
-                                                     "last_batch": -1}}, upsert=True)
-        for book_id in per_book
-    ], ordered=False)
-    db.rating_stats.bulk_write([  # 2. add this batch to each document at most once
-        UpdateOne({"_id": book_id, **not_yet_applied}, [
-            {"$set": {"rating_sum": {"$add": ["$rating_sum", s]}, "n_ratings": {"$add": ["$n_ratings", n]},
-                      "last_batch": batch_id, "updated": now}},
-            {"$set": {"avg_rating": {"$divide": ["$rating_sum", "$n_ratings"]}}},
-        ])
-        for book_id, (s, n) in per_book.items()
-    ], ordered=False)
-    db.user_seen.bulk_write([
-        UpdateOne({"_id": f"{r['user_id']}_{r['book_id']}"},
-                  {"$set": {"user_id": r["user_id"], "book_id": r["book_id"], "rating": r["rating"],
-                            "event_time": r["event_time"]}}, upsert=True)
-        for r in rows
+    touched_books = sorted({int(row["book_id"]) for row in rows})
+    latest_rows = latest_rows_by_pair(rows)
+    db.user_seen.bulk_write([latest_rating_update(row, now) for row in latest_rows], ordered=False)
+    # The query is the single live-rating path: latest rating per pair, then one coalesced job per user.
+    db.user_ratings.bulk_write([latest_rating_update(r, now) for r in latest_rows], ordered=False)
+    recompute_rating_stats(db, touched_books, batch_id)
+    latest_by_user = latest_event_by_user(latest_rows)
+    db.recommendation_jobs.bulk_write([
+        UpdateOne(
+            {"user_id": user_id, "status": "pending"},
+            {"$setOnInsert": {"created_at": now, "retry_count": 0},
+             "$set": {"requested_at": now, "updated_at": now,
+                      "latest_event_time": event[0], "latest_event_id": event[2]}},
+            upsert=True,
+        )
+        for user_id, event in latest_by_user.items()
     ], ordered=False)
     update_online_eval(db, rows, batch_id)
 
@@ -162,7 +240,7 @@ def process_valid(df, batch_id):
     db = get_db()
     if already_applied(db, "valid_events", batch_id):
         return
-    rows = df.select("user_id", "book_id", "rating", "event_time").collect()
+    rows = df.select("user_id", "book_id", "rating", "event_time", "ingested_at", "event_id").collect()
     apply_valid_rows(db, rows, batch_id)
     mark_applied(db, "valid_events", batch_id, events=len(rows))
 
@@ -173,20 +251,73 @@ def process_rejected(df, batch_id):
         mark_applied(db, "rejected_events", batch_id, events=df.count())
 
 
-def process_trending(df, batch_id):
-    """Update mode: each row is the complete current aggregate of one (window, book), so replacing the
-    document is idempotent - a batch replayed after a restart writes the same values again.
-    A batch only holds the (window, book) pairs touched in the last trigger, so collect() stays small."""
-    rows = df.select(F.col("window.start").alias("window_start"), F.col("window.end").alias("window_end"),
-                     "book_id", "n_ratings", "avg_rating", "n_liked").collect()
-    if not rows:
-        return
-    now = datetime.now(timezone.utc)
-    get_db().trending.bulk_write([
-        ReplaceOne({"_id": f"{r['book_id']}_{r['window_start']:%Y%m%dT%H%M}"},
-                   {**r.asDict(), "avg_rating": round(r["avg_rating"], 3), "updated": now}, upsert=True)
-        for r in rows
-    ], ordered=False)
+def find_lost_offsets(start_offsets, earliest_offsets):
+    """Return partition gaps where Kafka retention moved past Spark's next requested offset."""
+    lost = {}
+    for partition, start in start_offsets.items():
+        partition = str(partition)
+        earliest = earliest_offsets.get(partition, earliest_offsets.get(int(partition)))
+        if earliest is not None and int(start) < int(earliest):
+            lost[partition] = {
+                "requested_offset": int(start),
+                "earliest_available_offset": int(earliest),
+                "lost_records": int(earliest) - int(start),
+            }
+    return lost
+
+
+def record_offset_gaps(db, progress, earliest_offsets, topic=KAFKA_TOPIC):
+    """Persist each observed gap once and emit an explicit error log."""
+    sources = progress.get("sources", [])
+    all_gaps = {}
+    for source in sources:
+        start = source.get("startOffset") or {}
+        start = start.get(topic, {}) if isinstance(start, dict) else {}
+        gaps = find_lost_offsets(start, earliest_offsets)
+        for partition, values in gaps.items():
+            all_gaps[partition] = values
+            incident_id = (
+                f"kafka_offset_gap:{progress.get('id', 'unknown')}:"
+                f"{progress.get('batchId', 'unknown')}:{partition}"
+            )
+            db.stream_state.update_one(
+                {"_id": incident_id},
+                {"$setOnInsert": {
+                    "kind": "kafka_offset_gap",
+                    "query_id": progress.get("id"),
+                    "batch_id": progress.get("batchId"),
+                    "topic": topic,
+                    "partition": int(partition),
+                    **values,
+                    "detected_at": datetime.now(timezone.utc),
+                }},
+                upsert=True,
+            )
+            logger.error(
+                "Kafka offsets lost: topic=%s partition=%s requested=%d earliest=%d lost=%d",
+                topic, partition, values["requested_offset"],
+                values["earliest_available_offset"], values["lost_records"],
+            )
+    return all_gaps
+
+
+def kafka_earliest_offsets(topic):
+    """Read Kafka's current beginning offsets for each partition without joining a consumer group."""
+    from kafka import KafkaConsumer, TopicPartition
+
+    consumer = KafkaConsumer(
+        bootstrap_servers=KAFKA_BOOTSTRAP,
+        enable_auto_commit=False,
+        group_id=None,
+        consumer_timeout_ms=1000,
+    )
+    try:
+        partitions = consumer.partitions_for_topic(topic) or set()
+        topic_partitions = [TopicPartition(topic, partition) for partition in partitions]
+        beginnings = consumer.beginning_offsets(topic_partitions)
+        return {str(partition.partition): offset for partition, offset in beginnings.items()}
+    finally:
+        consumer.close()
 
 
 class ProgressLog:
@@ -196,12 +327,27 @@ class ProgressLog:
         self.path, self.settings, self.batches = path, settings, {}
 
     def collect(self, queries):
+        new_progress = []
         for name, q in queries.items():
             for p in q.recentProgress:  # Spark keeps the last 100 updates; we poll every 10 s
-                self.batches.setdefault(name, {})[p["batchId"]] = p
+                batches = self.batches.setdefault(name, {})
+                if p["batchId"] not in batches:
+                    new_progress.append((name, p))
+                    batches[p["batchId"]] = p
+        return new_progress
 
     def write(self, queries):
-        out = {"settings": self.settings, "written": datetime.now(timezone.utc).isoformat(), "queries": {}}
+        out = {
+            "settings": self.settings,
+            "written": datetime.now(timezone.utc).isoformat(),
+            "run_metadata": {
+                "commit_hash": os.getenv("BOOKPULSE_COMMIT_HASH") or None,
+                "working_tree_dirty": os.getenv("BOOKPULSE_WORKTREE_DIRTY"),
+                "python_version": platform.python_version(),
+                "configuration": self.settings,
+            },
+            "queries": {},
+        }
         for name, q in queries.items():
             progress = [self.batches.get(name, {})[b] for b in sorted(self.batches.get(name, {}))]
             ops = [op for p in progress for op in p.get("stateOperators", [])]
@@ -227,22 +373,22 @@ class ProgressLog:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--watermark", default="10 minutes", help="how late an event may arrive")
-    parser.add_argument("--trigger", default="5 seconds")
+    parser.add_argument("--watermark", default=STREAM_WATERMARK, help="how late an event may arrive")
+    parser.add_argument("--trigger", default=STREAM_TRIGGER)
     parser.add_argument("--starting-offsets", default="earliest")
     parser.add_argument("--run-seconds", type=int, default=0, help="0 = run until Ctrl+C")
-    parser.add_argument("--partitions", type=int, default=3, help="partitions if the topic has to be created")
-    parser.add_argument("--max-offsets", type=int, default=20000,
+    parser.add_argument("--partitions", type=int, default=STREAM_PARTITIONS,
+                        help="partitions if the topic has to be created")
+    parser.add_argument("--max-offsets", type=int, default=STREAM_MAX_OFFSETS,
                         help="maxOffsetsPerTrigger: most Kafka records one micro-batch reads (backpressure)")
-    parser.add_argument("--window", default="10 minutes", help="trending window length (event time)")
-    parser.add_argument("--slide", default="5 minutes", help="trending window slide")
     args = parser.parse_args()
+    if args.run_seconds < 0 or args.max_offsets < 1 or args.partitions < 1:
+        parser.error("--run-seconds cannot be negative; --max-offsets and --partitions must be positive")
 
     ensure_topic(args.partitions)
     db = get_db()
-    db.user_seen.create_index("user_id")  # the app reads user_seen by user_id (no full collection scan)
-    db.trending.create_index("window_end", expireAfterSeconds=24 * 3600)  # MongoDB TTL drops old windows
-    db.trending.create_index([("window_start", 1), ("n_ratings", -1)])
+    ensure_indexes(db)
+    recompute_rating_stats(db)
     spark = get_spark("bookpulse-stream", kafka=True)
     events = (
         spark.readStream.format("kafka")
@@ -255,6 +401,7 @@ def main():
         .select(F.from_json(F.col("value").cast("string"), SCHEMA).alias("e"))
         .select("e.*")
         .withColumn("event_time", F.to_timestamp("event_time"))
+        .withColumn("ingested_at", F.current_timestamp())
     )
     is_valid = F.coalesce(
         F.col("event_id").isNotNull() & F.col("user_id").isNotNull() & F.col("book_id").isNotNull()
@@ -265,59 +412,77 @@ def main():
              .withWatermark("event_time", args.watermark)
              .dropDuplicatesWithinWatermark(["event_id"]))
     rejected = events.filter(~is_valid)
-    # Stateful event-time window on the de-duplicated stream, so a duplicate is never counted twice
-    trending = (valid.groupBy(F.window("event_time", args.window, args.slide), "book_id")
-                .agg(F.count("*").alias("n_ratings"), F.avg("rating").alias("avg_rating"),
-                     F.sum(F.when(F.col("rating") >= 4, 1).otherwise(0)).alias("n_liked")))
+    valid_events = events.filter(is_valid).withColumn("event_date", F.to_date("event_time"))
 
-    queries = {
-        "valid": valid.writeStream.queryName("valid").foreachBatch(process_valid)
-        .option("checkpointLocation", str(CHECKPOINT_DIR / "stream_valid"))
-        .trigger(processingTime=args.trigger).start(),
-        "rejected": rejected.writeStream.queryName("rejected").foreachBatch(process_rejected)
-        .option("checkpointLocation", str(CHECKPOINT_DIR / "stream_rejected"))
-        .trigger(processingTime=args.trigger).start(),
-        # Archive for the next batch retrain: every valid event, late ones included; stateless and
-        # exactly-once (file sink). De-duplication happens in batch (clean.py), exactly, by event_id.
-        "events": events.filter(is_valid).withColumn("event_date", F.to_date("event_time"))
-        .writeStream.queryName("events_to_parquet").format("parquet").outputMode("append").partitionBy("event_date")
-        .option("path", str(STREAM_EVENTS_DIR))
-        .option("checkpointLocation", str(CHECKPOINT_DIR / "stream_events_archive"))
-        .trigger(processingTime=args.trigger).start(),
-        "trending": trending.writeStream.queryName("trending").outputMode("update").foreachBatch(process_trending)
-        .option("checkpointLocation", str(CHECKPOINT_DIR / "stream_trending"))
-        .trigger(processingTime=args.trigger).start(),
-    }
+    def start_queries():
+        return {
+            "valid": valid.writeStream.queryName("valid").foreachBatch(process_valid)
+            .option("checkpointLocation", str(CHECKPOINT_DIR / "stream_valid"))
+            .trigger(processingTime=args.trigger).start(),
+            "rejected": rejected.writeStream.queryName("rejected").foreachBatch(process_rejected)
+            .option("checkpointLocation", str(CHECKPOINT_DIR / "stream_rejected"))
+            .trigger(processingTime=args.trigger).start(),
+            # Archive every valid event, including late events; batch clean deduplicates by event_id.
+            "archive": valid_events.writeStream.queryName("archive").format("parquet").outputMode("append")
+            .partitionBy("event_date")
+            .option("path", str(STREAM_EVENTS_DIR))
+            .option("checkpointLocation", str(CHECKPOINT_DIR / "stream_events_archive"))
+            .trigger(processingTime=args.trigger).start(),
+        }
+
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     log = ProgressLog(REPORT_DIR / f"stream_progress_{time.strftime('%Y%m%d_%H%M%S')}.json",
-                      {"watermark": args.watermark, "window": args.window, "slide": args.slide,
-                       "trigger": args.trigger, "topic": KAFKA_TOPIC})
+                      {"watermark": args.watermark, "trigger": args.trigger,
+                       "max_offsets": args.max_offsets, "topic": KAFKA_TOPIC,
+                       "kafka_log_retention_ms": KAFKA_LOG_RETENTION_MS})
     print(f"streaming from '{KAFKA_TOPIC}' at {KAFKA_BOOTSTRAP}; Ctrl+C to stop; progress -> {log.path.name}")
     started = time.time()
+    retry = 0
     try:
-        while all(q.isActive for q in queries.values()):
-            time.sleep(10)
-            log.collect(queries)
-            log.write(queries)
-            for name, q in queries.items():
-                p = q.lastProgress
-                if p and p["numInputRows"]:
-                    dropped = sum(op.get("customMetrics", {}).get("numDroppedDuplicateRows", 0)
-                                  for op in p.get("stateOperators", []))
-                    print(f"[{name}] batch {p['batchId']}: {p['numInputRows']} rows, "
-                          f"{p.get('processedRowsPerSecond', 0):.1f} rows/s, duplicates dropped {dropped}")
-            if args.run_seconds and time.time() - started > args.run_seconds:
+        while True:
+            queries = start_queries()
+            try:
+                while True:
+                    failed = {name: query.exception() for name, query in queries.items()
+                              if not query.isActive}
+                    if failed:
+                        reason = next((error for error in failed.values() if error), None)
+                        if reason:
+                            raise reason
+                        raise RuntimeError(f"Streaming queries stopped unexpectedly: {', '.join(failed)}")
+                    time.sleep(10)
+                    new_progress = log.collect(queries)
+                    valid_progress = [progress for name, progress in new_progress if name == "valid"]
+                    if valid_progress:
+                        earliest = kafka_earliest_offsets(KAFKA_TOPIC)
+                        for progress in valid_progress:
+                            record_offset_gaps(db, progress, earliest)
+                    log.write(queries)
+                    for name, query in queries.items():
+                        progress = query.lastProgress
+                        if progress and progress["numInputRows"]:
+                            dropped = sum(op.get("customMetrics", {}).get("numDroppedDuplicateRows", 0)
+                                          for op in progress.get("stateOperators", []))
+                            print(f"[{name}] batch {progress['batchId']}: {progress['numInputRows']} rows, "
+                                  f"{progress.get('processedRowsPerSecond', 0):.1f} rows/s, "
+                                  f"duplicates dropped {dropped}")
+                    if args.run_seconds and time.time() - started > args.run_seconds:
+                        return
+            except KeyboardInterrupt:
                 break
-        for q in queries.values():
-            if q.exception():
-                raise q.exception()
+            except Exception:
+                retry += 1
+                logger.exception("Streaming query failed; restarting from its checkpoint (attempt %d)", retry)
+                log.collect(queries)
+                log.write(queries)
+                time.sleep(STREAM_RESTART_SECONDS)
+            finally:
+                for query in queries.values():
+                    if query.isActive:
+                        query.stop()
     except KeyboardInterrupt:
         pass
     finally:
-        log.collect(queries)
-        log.write(queries)
-        for q in queries.values():
-            q.stop()
         spark.stop()
 
 

@@ -6,9 +6,8 @@ valid vs invalid events, how many messages repeat an event_id, and how many vali
 
 It then reads the streaming job's counters back from MongoDB and checks them against Kafka:
   valid events counted   == distinct valid events - distinct valid late events   (no loss, no double count)
-  sum of rating_stats    == valid events counted
+  sum of rating_stats    == current user-book pairs in user_ratings
   rejected events        == invalid messages
-  sum over trending windows == 2 x (valid - late)   (10-minute windows sliding every 5 minutes)
 and counts the Parquet archive (data/parquet/stream_events) through its _spark_metadata log:
   archive rows == valid messages (no watermark, no de-duplication),  distinct ids == distinct valid
 so every streaming number in the report has a saved check. Writes reports/kafka_audit_<ts>.json.
@@ -22,7 +21,9 @@ from urllib.parse import unquote, urlparse
 
 from kafka import KafkaConsumer
 
-from common.settings import KAFKA_BOOTSTRAP, KAFKA_TOPIC, STREAM_EVENTS_DIR, get_db, save_report
+from common.settings import (
+    KAFKA_BOOTSTRAP, KAFKA_LOG_RETENTION_MS, KAFKA_TOPIC, STREAM_EVENTS_DIR, get_db, save_report,
+)
 
 
 def parse_json(value):
@@ -68,6 +69,7 @@ def main():
     consumer.close()
     report = {
         "topic": KAFKA_TOPIC,
+        "configured_retention_ms": KAFKA_LOG_RETENTION_MS,
         "messages": total,
         "messages_per_partition": dict(sorted(partitions.items())),
         "distinct_event_ids": len(seen),
@@ -82,24 +84,37 @@ def main():
         db = get_db()
         valid = db.stream_state.find_one({"_id": "valid_events"}) or {}
         rejected = db.stream_state.find_one({"_id": "rejected_events"}) or {}
-        stats_sum = next(iter(db.rating_stats.aggregate(
-            [{"$group": {"_id": None, "n": {"$sum": "$n_ratings"}}}])), {}).get("n", 0)
-        trending_sum = next(iter(db.trending.aggregate(
-            [{"$group": {"_id": None, "n": {"$sum": "$n_ratings"}}}])), {}).get("n", 0)
+        stats_sum = next(iter(db.rating_stats.aggregate([
+            {"$match": {"stale": {"$ne": True}}},
+            {"$group": {"_id": None, "n": {"$sum": "$n_ratings"}}},
+        ])), {}).get("n", 0)
+        user_rating_pairs = db.user_ratings.count_documents({})
         expected = len(valid_ids) - len(late_valid_ids)
         report["mongo_check"] = {
             "valid_events_counted": valid.get("events", 0),
             "expected_valid_minus_late": expected,
-            "sum_n_ratings_in_rating_stats": stats_sum,
+            "current_pairs_in_user_ratings": user_rating_pairs,
+            "sum_unique_pairs_in_rating_stats": stats_sum,
             "rejected_events_counted": rejected.get("events", 0),
             "user_seen_pairs": db.user_seen.count_documents({}),
-            "trending_windows": db.trending.count_documents({}),
-            # windows are 10 min sliding every 5 min, so every on-time event sits in exactly 2 windows
-            "trending_sum_n_ratings": trending_sum,
-            "expected_trending_2x": 2 * expected,
-            "no_loss_no_double_count": valid.get("events", 0) == expected == stats_sum,
+            "no_loss_no_double_count": valid.get("events", 0) == expected and stats_sum == user_rating_pairs,
             "rejected_match": rejected.get("events", 0) == invalid,
-            "trending_match": trending_sum == 2 * expected,
+        }
+        offset_gaps = list(db.stream_state.find(
+            {"kind": "kafka_offset_gap"},
+            {"partition": 1, "lost_records": 1, "_id": 0},
+        ))
+        report["kafka_offset_loss"] = {
+            "incidents": len(offset_gaps),
+            "lost_records": sum(int(row.get("lost_records", 0)) for row in offset_gaps),
+            "by_partition": {
+                str(partition): sum(
+                    int(row.get("lost_records", 0))
+                    for row in offset_gaps if str(row.get("partition")) == str(partition)
+                )
+                for partition in sorted({int(row["partition"]) for row in offset_gaps})
+            },
+            "status": "loss-detected" if offset_gaps else "no-gap-recorded",
         }
     if not args.no_archive:
         report["archive_check"] = archive_check(valid_messages, len(valid_ids))

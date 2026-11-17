@@ -14,4 +14,4 @@ if [ "${1:-}" != "--yes" ]; then
   [ "$ok" = "y" ] || [ "$ok" = "Y" ] || { echo "cancelled"; exit 1; }
 fi
 
-docker compose exec -T spark python scripts/reset_streaming.py
+docker compose exec -T spark python scripts/reset_streaming.py --yes

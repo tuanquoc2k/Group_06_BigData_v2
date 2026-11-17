@@ -1,6 +1,6 @@
 # BookPulse – Kịch bản demo Session 10
 
-Demo trực tiếp cho Final Assessment: chạy lần lượt MapReduce → Spark SQL → Spark ML + MongoDB → Streaming, mỗi phần có một kết quả nhìn thấy được và một phép kiểm chứng. Thời lượng dự kiến 8–10 phút (đo lần tập 07/11: chuẩn bị 80 giây, Hadoop sẵn sàng sau khoảng 37 giây; job MapReduce 72 giây tính cả khởi động (job 52 giây) + kiểm chứng 30 giây; Spark SQL tức thì; mongosh khoảng 3 giây; streaming khoảng 3,5 phút kể cả `rate_from_recs.py`). Mọi lệnh chạy trong Git Bash, từ thư mục `bookpulse/` trừ khi ghi khác.
+Demo trực tiếp cho Final Assessment: MapReduce → Spark SQL → Spark ML/MongoDB → streaming và fold-in, mỗi phần có kết quả nhìn thấy được và phép kiểm chứng. Các thời gian MapReduce/streaming là số đo buổi tập, có thể thay đổi theo máy. Mọi lệnh chạy trong Git Bash, từ thư mục `bookpulse/` trừ khi ghi khác.
 
 **Mỗi terminal Git Bash mở ra đều chạy trước:** `export MSYS_NO_PATHCONV=1`. Thiếu dòng này, Git Bash đổi đường dẫn trong container `/bookpulse/...` thành `C:/Program Files/Git/bookpulse/...` và lệnh MapReduce báo "No such file".
 
@@ -9,8 +9,8 @@ Demo trực tiếp cho Final Assessment: chạy lần lượt MapReduce → Spar
 ```bash
 cd "D:\Big Data\Group_06_BigData\bookpulse"
 export MSYS_NO_PATHCONV=1
-docker compose up -d                                  # spark, kafka, mongo, app
-docker compose ps                                     # 4 service "running"
+docker compose up -d --build                          # spark, kafka, mongo, app, recommendation-worker
+docker compose ps                                     # 5 service "running"
 cd mapreduce/hadoop && docker compose up -d && cd ../..    # chỉ `stop`/`start` cụm Hadoop, KHÔNG `down`: down xoá container, lần up sau phải build lại image (nhiều dòng "pull access denied" rồi mới Building), tạo volume mới và HDFS trống cho tới khi run_hadoop.sh upload lại
 docker compose -f mapreduce/hadoop/docker-compose.yml logs client | grep "BOOKPULSE HADOOP READY"   # phải in ra dòng này; chưa có thì chờ rồi chạy lại
 docker compose -f mapreduce/hadoop/docker-compose.yml exec -T client hdfs dfsadmin -safemode wait   # chờ đến "Safe mode is OFF"
@@ -23,11 +23,11 @@ Tùy chọn, làm trước buổi (khoảng 3 phút): `bash scripts/stream_fault
 Tùy chọn, **không** làm trong demo trực tiếp (khoảng 5 phút): `bash scripts/stream_outage_test.sh` tắt Kafka 40 giây rồi MongoDB 30 giây trong lúc producer gửi 3.000 sự kiện và job streaming đang chạy, rồi chạy `kafka_audit.py`. Script tự reset streaming lúc bắt đầu; chạy xong thì chạy lại `bash scripts/reset_streaming.sh --yes` để demo bắt đầu từ số 0. Kết quả ghi vào `reports/streaming/outage_test_<thời điểm>/` (`events.log` là dòng thời gian).
 
 Kiểm tra nhanh:
-- http://localhost:8501: app (nền sáng) hiện "ALS implicit · phiên bản mô hình <bản mới nhất, xem `db.meta.findOne()`; 15/11: 20261114_190600>" và top-10 của user 1: #1 The Catcher in the Rye, #2 The Joy Luck Club, #3 The Guernsey Literary and Potato Peel Pie Society (sau mỗi lần bấm Train lại, danh sách có thể đổi nhẹ; kiểm tra lại dòng này trước buổi).
+- Chạy `scripts/run_pipeline.sh` trước demo để tạo model/artifact và `user_profiles_<version>` mới; kiểm tra `db.meta.findOne()` và `foldin_available`. Không dùng phiên bản/top-10 hay metric lịch sử như kết quả hiện tại.
 - http://localhost:8088: YARN có 1 NodeManager.
 - Mở sẵn 3 terminal Git Bash ở thư mục `bookpulse/` (đã `export MSYS_NO_PATHCONV=1`) và các tab trình duyệt: app (8501), YARN (8088), HDFS (9870).
 - Máy cần đủ RAM: tắt bớt ứng dụng khác. Nếu máy chậm, chạy MapReduce trước giờ demo và chỉ trình bày kết quả (mục 6).
-- **Không chạy batch khi job streaming đang chạy.** Nếu phải chạy lại `bash scripts/run_pipeline.sh` (khoảng 25–35 phút), dừng job streaming trước (Ctrl+C): hai driver 4 GB không vừa 7,7 GiB RAM. Trong lúc đó sự kiện chờ trong Kafka (giữ 7 ngày), app vẫn phục vụ gợi ý và số liệu cũ; chạy lại job thì nó đọc tiếp từ checkpoint, tối đa 20.000 offset mỗi batch.
+- **Không chạy batch khi job streaming đang chạy.** Dừng job streaming trước (Ctrl+C): hai driver 4 GB không vừa 7,7 GiB RAM. Thời gian pipeline tùy máy, xem `reports/pipeline_*.json`; sự kiện chờ trong Kafka và app vẫn phục vụ bản cũ.
 
 ## 2. MapReduce (Hảo, ~2 phút)
 
@@ -68,8 +68,7 @@ Chỉ vào:
 
 ## 4. Spark ML + MongoDB (Kiệt, ~2 phút)
 
-- App: nhập user **1**, rồi **2**, rồi **22**: mỗi người một danh sách khác nhau (bản 20261114_190600, kiểm tra lại trước buổi vì mỗi lần bấm Train lại danh sách đổi nhẹ). User 1: The Catcher in the Rye, The Joy Luck Club, Guernsey, The Diary of a Young Girl, The Da Vinci Code…; user 2 nghiêng về kinh điển học ở trường và phi hư cấu (Freakonomics, To Kill a Mockingbird, Animal Farm, Huckleberry Finn, Lord of the Flies, 1984); user 22 gần như toàn Stephen King (The Shining, Misery, Carrie, Pet Sematary, rồi A Game of Thrones). Không nói là ba thể loại tách bạch: Animal Farm và Lord of the Flies có trong danh sách của cả user 1 và 2 (mô hình hơi nghiêng về sách nổi tiếng). Dòng chú thích ghi "ALS implicit · phiên bản mô hình …". (User 3 không dùng nữa vì hai cuốn đầu trùng user 1.)
-- Nói lý do chọn implicit: Precision@10 0,204 so với explicit 0,008 và sách phổ biến 0,078 (slide 10). Nếu bị hỏi: mô hình phục vụ fit trên toàn bộ tập train (80% dữ liệu).
+- App: nhập user **1**, **2**, rồi **22**; dùng `source` và `model_version` trên trang làm bằng chứng, không đọc tên sách/metric cũ cố định. Sau khi pipeline mới chạy, chỉ báo P@10/Recall@10 từ report có cùng `model_version`; số 0,204 và các ví dụ trong tài liệu cũ là benchmark lịch sử.
 - MongoDB (khoảng 3 giây):
 
 ```bash
@@ -77,12 +76,14 @@ docker compose exec mongo mongosh bookpulse --quiet --eval 'db.meta.findOne({}, 
 docker compose exec mongo mongosh bookpulse --quiet --eval '
   const c = db.meta.findOne().recs_collection;
   printjson(db[c].find({_id: 1}, {recs: {$slice: 3}, fallback: 1}).next());
-  print(db[c].find({_id: 1}).explain("executionStats").queryPlanner.winningPlan.stage)'
+  print(db[c].find({_id: 1}).explain("executionStats").queryPlanner.winningPlan.stage);
+  printjson(db.recs_live.findOne({_id: 1}, {source: 1, model_version: 1,
+      event_to_recommend_seconds: 1, ingestion_to_recommend_seconds: 1}))'
 ```
 
-Nói: "Mỗi người dùng một document; truy vấn theo `_id` dùng IDHACK, đọc đúng một document." Ba gợi ý đầu của user 1 (bản 20261114_190600): 8 (0,80), 118 (0,77), 195 (0,75).
+Nói: "Batch recommendations và history profile đã được tạo theo model version. Sau khi chấm sao, worker fold-in dùng lịch sử tích cực cùng rating stream mới nhất; recs_live chỉ được app đọc nếu version còn active."
 
-*Nếu được hỏi về `previous_collection`: `meta` ghi bản đang dùng và bản dùng trước đó (15/11: `recommendations_20261114_190600`, trước là `_20261114_190214`); quay lại bằng cách đặt `recs_collection` về bản trước. Cổng kiểm tra đủ 53.424 user trước khi chuyển đã chạy thật ở mỗi lần bấm Train lại (`reports/retrain_*.json`, `write_recs_*.json`).*
+*Nếu được hỏi về `previous_collection`: `meta` giữ bản đang dùng và bản dùng trước; `write_recs.py` chỉ chuyển active sau khi đủ documents cho recommendations và user profiles. Đọc collection/version hiện tại từ `meta`, không dùng tên phiên bản đã lưu trong ghi chú cũ.*
 
 ## 5. Streaming (Tuấn, ~3,5 phút)
 
@@ -102,21 +103,22 @@ Cách không dùng dòng lệnh: thanh bên trái của app, khung **Giả lập
 
 Nói: "Bộ Goodbooks không có người dùng đang hoạt động, nên nhóm sinh rating giả cho các cặp user–sách **chưa có** trong dữ liệu, chọn theo độ phổ biến và tỷ lệ số sao thật. Producer gửi chúng như lượt chấm vừa xảy ra, kèm cố ý 2% bản trùng, 1% sự kiện lỗi và 5% sự kiện trễ để thấy hệ thống loại."
 
-Số trùng/lỗi/trễ đổi theo lần chạy (lần tập 15/11: `sent 1000, duplicates 23, invalid 10, late 11`; lần 10/11: 20 / 8 / 22), nên KHÔNG đọc số cố định mà đọc công thức: hợp lệ trên app = 1.000 − số `late` producer in; sự kiện lỗi = số `invalid`; "Lượt 4–5 sao trúng top-10" khác 0 ngay trong lúc producer chạy vì dữ liệu giả là cặp chưa có trong train (15/11: 6 / 656 trước khi chấm sao; 10/11: 11 / 651). Bằng chứng có file: `reports/kafka_audit_20261114_19*.json`, `nosql_evidence_20261114_19*.json` (lượt 15/11).
+Số trùng/lỗi/trễ thay đổi theo lần chạy: đọc các giá trị producer in ra và đối chiếu report hiện tại. Chỉ số online_eval có tính vòng tròn vì demo chọn sách từ recommendations; chỉ dùng để xác nhận luồng ghi, không tuyên bố là chất lượng mô hình.
 
 Trong lúc producer chạy:
 - Mở http://localhost:4040 → tab **Structured Streaming**: 4 query có tên (`valid`, `rejected`, `events_to_parquet`, `trending`); bấm vào `trending` để thấy tốc độ vào (khoảng 20 sự kiện/giây), thời gian batch (lần tập 15/11 với cache Ivy ấm: job sẵn sàng sau 9 giây, batch dài nhất 3 giây; máy lạnh: batch đầu 7–12 giây), watermark.
 - App → bấm **Làm mới**: số sự kiện tăng, cột "Điểm TB (stream)", mục **"Sách đang hot"** xuất hiện (chỉ sách có lượt 4–5 sao, xếp theo số lượt 4–5 sao; lượt 1–3 sao không đẩy sách lên bảng, K37).
-- Chỉ số "Lượt 4–5 sao trúng top-10" đã khác 0 (dữ liệu giả có thể trúng). **Đọc to con số này trước khi chấm sao** để lát nữa chỉ ra "+2". (Chỉ khi phát lại `ratings.csv` chỉ số mới luôn 0/N, vì sách đó đã bị loại khỏi gợi ý; ảnh `app_trending.png` 08/11 với 2 / 672 là lượt như vậy.)
+- Đọc chỉ số "Lượt 4–5 sao trúng top-10" trước/sau nếu muốn minh họa pipeline; nhắc rõ đây không phải metric offline.
 
-**Sách vừa chấm biến khỏi top-10 (chấm ngay trong app).** Khi producer báo `done`, nhập user **1** trong app, chỉ vào #1 (15/11: The Catcher in the Rye). Kéo xuống mục **Chấm sao**: chọn sách "#1 · …", số sao ★★★★★, bấm **Gửi lượt chấm**. App báo "Đã gửi: user 1 chấm 5 sao cho #1 · The Catcher in the Rye." (app chỉ gửi sự kiện vào Kafka). Muốn chấm thêm #2 (The Joy Luck Club) thì chọn "#2 · …" rồi bấm gửi lần nữa (chưa cần làm mới).
+**Sách vừa chấm biến khỏi top-10 (chấm ngay trong app).** Khi producer báo `done`, nhập user **1** trong app, chọn sách đang hiển thị ở #1 trong mục **Chấm sao**, chọn ★★★★★ và bấm **Gửi lượt chấm**. App chỉ gửi sự kiện vào Kafka. Có thể chấm thêm một sách trước khi refresh để quan sát debounce/coalescing.
 
-Chờ 5–10 giây (một trigger), bấm **Làm mới**. Chỉ vào:
-- Cuốn vừa chấm đã biến mất, các cuốn sau dồn lên, cuốn mới vào cuối danh sách, lấy từ 30 gợi ý đã lưu. Nếu chấm cả #1 và #2 (bản 20261114_190600): Guernsey lên #1, hai cuốn #11–12 của danh sách đã lưu vào #9–10 (xem trước bằng `db[c].findOne({_id: 1}).recs.slice(10, 12)` trong mongosh).
-- Dòng chú thích trên bảng: "ALS implicit · phiên bản mô hình … · đã ẩn 2 cuốn vừa chấm".
-- Chỉ số "Lượt 4–5 sao trúng top-10" tăng đúng bằng số lượt vừa chấm (15/11: 6 / 656 → 8 / 658).
+Chờ 5–10 giây (trigger + debounce), bấm **Làm mới**. User 1 có lịch sử batch đủ rating tích cực, nên worker có thể fold-in ngay sau rating stream. Chỉ vào:
+- Cuốn vừa chấm đã biến mất khỏi danh sách; app ưu tiên `recs_live` nếu worker đã hoàn tất, nếu không vẫn dùng batch và ẩn qua `user_seen`.
+- Dòng nguồn phải ghi `als-foldin` và cùng `model_version` với `meta.active`; nếu worker chưa chạy, app chỉ hiển thị batch, nhưng `user_seen` vẫn ẩn sách vừa chấm.
+- `recs_live` lưu `event_time`, `ingested_at`, `recommended_at` và hai latency metric; đọc số đo thực tế, không dùng số demo cố định.
+- Nếu chỉ số online_eval đổi, mô tả đó là sanity check của đường streaming, không phải đánh giá offline.
 
-Nói: "Nút này không ghi MongoDB. App chỉ gửi một sự kiện chấm sao vào Kafka, giống producer; job Spark Structured Streaming kiểm tra, bỏ trùng rồi ghi `user_seen` trong MongoDB; app đọc lại thì ẩn cuốn đó và đẩy cuốn tiếp theo lên, không cần huấn luyện lại."
+Nói: "App chỉ gửi sự kiện vào Kafka. Streaming upsert `user_ratings`, ghi `user_seen` và coalesce job; worker fold-in vector user từ `user_profiles` + rating mới, giữ item factors cố định, rồi ghi top-30 vào `recs_live`. Đây là inference, không phải train ALS tăng dần."
 
 Dự phòng nếu trình duyệt có vấn đề: cùng việc đó bằng dòng lệnh (2 cuốn đầu một lượt):
 

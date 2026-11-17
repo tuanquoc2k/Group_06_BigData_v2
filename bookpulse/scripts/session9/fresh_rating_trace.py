@@ -84,7 +84,7 @@ def main():
         time.sleep(0.5)
     if t_seen is None:
         raise SystemExit("user_seen did not receive the event: is streaming/stream_stats.py running?")
-    time.sleep(12)  # let the trending/archive queries commit their next micro-batch too
+    time.sleep(12)  # let the archive query commit its next micro-batch too
 
     after = [r["book_id"] for r in visible_top10(db, args.user, TOP_K)["top10"]]
     seen_after = db.user_seen.count_documents({"user_id": args.user})

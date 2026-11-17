@@ -2,9 +2,11 @@
 
 ## Kết luận
 
-App BookPulse dùng **ALS implicit** (`models/als_implicit`, rank 50, regParam 0,1, alpha 1,0) thay cho **ALS explicit** dùng trước đây.
+App BookPulse dùng **ALS implicit** (artifact có version tại `models/als_implicit/versions/<model_version>`, rank/regParam/alpha trong manifest) thay cho **ALS explicit** dùng trước đây.
 
-Trên cùng tập test, cùng 4.993 người dùng được đánh giá, **Precision@10 tăng từ 0,008 lên 0,204**: gấp khoảng 26 lần mô hình cũ và gấp 2,6 lần cách đơn giản nhất là gợi ý sách phổ biến cho mọi người (0,078). Mô hình được chọn theo Precision@10 chứ không theo RMSE, vì người dùng chỉ thấy danh sách 10 cuốn, không thấy số sao dự đoán.
+> **Cập nhật quan trọng:** Các số liệu 0,204 / 0,008 / 0,078 và các ví dụ bên dưới là kết quả lịch sử của quy trình cũ. Sau thay đổi, chỉ rating >= 4 là tín hiệu tích cực mặc định; test giữ lại ngẫu nhiên theo từng user; sách rating thấp vẫn bị loại khỏi gợi ý. Không dùng các số lịch sử làm kết quả của cấu hình mới. Chạy `scripts/run_pipeline.sh` và đọc `reports/train_als_*.json`, `reports/train_als_implicit_*.json`, `reports/foldin_eval_*.json` để có số đo mới.
+
+Trong benchmark lịch sử, trên cùng tập test và cùng 4.993 người dùng, Precision@10 tăng từ 0,008 lên 0,204. Đây không phải kết quả của pipeline mới; mô hình vẫn được chọn theo Precision@10 thay vì RMSE vì người dùng chỉ thấy danh sách 10 cuốn.
 
 Số liệu: lần chạy cuối 06/11/2026 bằng `scripts/run_pipeline.sh` từ trạng thái sạch, `reports/train_als_20261106_124521.json` (explicit) và `reports/train_als_implicit_20261106_125816.json` (implicit). Báo cáo cuối kỳ dùng cùng các số này. (Lần chạy 05/11 cho kết quả gần như trùng và cùng kết luận.)
 
@@ -30,18 +32,22 @@ Cùng thuật toán ALS (phân rã ma trận người dùng × sách) trong Spar
 | | ALS explicit (cũ) | ALS implicit (mới) |
 |---|---|---|
 | Câu hỏi mô hình học | "Người này sẽ chấm cuốn này mấy sao?" | "Người này có chọn đọc cuốn này không?" |
-| Dữ liệu dùng để học | Chỉ những ô đã có rating | Mọi ô: có rating là đã chọn, trống là chưa chọn |
-| Vai trò của số sao | Là đáp án cần đoán | Là độ tin cậy: `c = 1 + alpha × rating` |
+| Dữ liệu dùng để học | Chỉ những ô đã có rating | Rating >= ngưỡng (mặc định 4) là tín hiệu tích cực; ô trống và rating thấp không phải tín hiệu thích |
+| Vai trò của số sao | Là đáp án cần đoán | Độ tin cậy của tín hiệu thích: `c = 1 + alpha × rating` |
 | Điểm đầu ra | Số sao dự đoán (khoảng 1–5) | Mức phù hợp (thường 0–1), không phải số sao |
 | Tối ưu cho | Sai số số sao (RMSE) | Thứ hạng, tức chọn đúng top-10 |
 
-Vì implicit học cả từ những cuốn người dùng **không** chọn, nó biết sách nào hợp với gu của từng người. Đó đúng là việc của hệ thống gợi ý.
+Implicit học các tương tác tích cực (mặc định rating 4–5); rating 1–3 không dùng để huấn luyện nhưng vẫn được giữ trong tập sách đã chấm để loại khỏi gợi ý.
 
 Trong Spark: `ALS(implicitPrefs=True, alpha=..., rank=..., regParam=...)`.
 
+Với implicit model, BookPulse dùng `nonnegative=False`: khi item factors cố định, user vector có nghiệm đóng
+`(YtY + Y_u^T(C_u - I)Y_u + lambda |I_u| I)^-1 Y_u^T C_u p_u`. Giữ cùng cấu hình này giúp worker fold-in
+khớp vector mà Spark ALS học được; explicit model giữ cấu hình không âm cũ.
+
 ## 3. So sánh công bằng: cách làm
 
-- **Cùng dữ liệu, cùng cách chia**: 5.976.479 rating, chia ngẫu nhiên với seed 42 thành 4.780.968 dòng train và 1.195.511 dòng test. Cả hai mô hình dùng đúng cùng tập train và tập test.
+- **Benchmark cũ (không còn đại diện):** 5.976.479 rating, randomSplit theo dòng. Pipeline mới lọc rating >= ngưỡng trước khi train và giữ lại ngẫu nhiên rating theo từng user; người dùng có một rating tích cực duy nhất vẫn được giữ trong train.
 - **Cùng cách đánh giá**: 4.993 người dùng lấy ngẫu nhiên từ tập test. Một cuốn được tính là "liên quan" nếu người dùng chấm 4–5 sao trong tập test. Sách người dùng đã chấm trong tập train không bao giờ được gợi ý.
 - **Chọn tham số không nhìn tập test**: mỗi mô hình chọn tham số trên một phần validation tách từ tập train.
   - Explicit chọn theo RMSE (TrainValidationSplit).
@@ -51,7 +57,7 @@ Trong Spark: `ALS(implicitPrefs=True, alpha=..., rank=..., regParam=...)`.
 
 ## 4. Kết quả
 
-### Trên tập test
+### Benchmark lịch sử (không tái sử dụng)
 
 | Mô hình | RMSE | Precision@10 | Recall@10 | Số đầu sách được gợi ý |
 |---|---|---|---|---|
@@ -105,19 +111,19 @@ Với mô hình mới, mỗi người nhận một danh sách khác nhau, dù c�
 ## 6. Vì sao chọn ALS implicit
 
 1. **Đúng mục tiêu của sản phẩm.** Người dùng chỉ thấy 10 cuốn, nên thước đo phải là chất lượng top-10 (Precision@10, Recall@10), không phải sai số số sao.
-2. **Tốt hơn rõ rệt trên đúng thước đo đó.** Precision@10 0,204 so với 0,008 (explicit) và 0,078 (sách phổ biến), trên cùng tập test và cùng người dùng.
+2. **Benchmark cũ tốt hơn trên đúng thước đo đó.** Precision@10 0,204 so với 0,008 (explicit) và 0,078 (sách phổ biến); không áp dụng cho pipeline hiện tại.
 3. **Vẫn cá nhân hóa.** 1.224 đầu sách được gợi ý so với 39 của baseline; danh sách khác nhau theo từng người.
 4. **Không đổi kiến trúc.** Vẫn là ALS trong Spark MLlib, cùng cách ghi vào MongoDB và cùng app. Chỉ đổi tham số mô hình và nhãn một cột hiển thị.
 5. **Chọn tham số đúng quy trình.** Chọn trên validation, test chỉ dùng một lần, nên con số 0,204 không bị thổi phồng do leakage.
 
 ## 7. Đánh đổi và giới hạn
 
-- **Không còn đoán số sao.** Điểm của mô hình implicit là mức phù hợp (khoảng 0–1), nên app đổi tên cột "Điểm dự đoán (sao)" thành "Mức phù hợp", và RMSE không áp dụng cho mô hình này. Mô hình explicit vẫn được giữ trong `models/als` để báo cáo RMSE.
+- **Không còn đoán số sao.** Điểm của mô hình implicit là mức phù hợp, không phải dự đoán số sao; RMSE không áp dụng cho mô hình này.
 - **Nghiêng về sách nổi tiếng hơn.** Ví dụ Animal Farm có trong danh sách của cả user 1, 2 và 3, The Great Gatsby trong danh sách của user 1 và 3, và độ phủ thấp hơn explicit một chút (1.224 so với 1.370). Đây là đặc điểm thường gặp của mô hình implicit; có thể giảm bằng cách thêm hình phạt độ phổ biến khi xếp hạng (chưa làm).
 - **Mới thử 4 bộ tham số** (rank 20 hoặc 50, alpha 1 hoặc 10). Có thể còn bộ tốt hơn, ví dụ rank lớn hơn hoặc regParam khác.
 - **Mô hình phục vụ được fit trên toàn bộ tập train (80% dữ liệu)**; chưa fit lại trên 100% dữ liệu trước khi ghi gợi ý (xem phần Kết luận).
-- **Chia train/test ngẫu nhiên**, vì Goodbooks-10k không có thời điểm chấm. Chia theo thời gian sẽ sát thực tế hơn, nhưng không làm được với dữ liệu này. Rating đến từ streaming (cột `from_stream`) luôn được đưa vào tập train, để mô hình học mọi lượt chấm mới (sửa 10/11).
-- **Đánh giá online trong app chưa đo được chất lượng mô hình.** Streaming phát lại rating đã có trong dữ liệu huấn luyện, mà những sách đó đã bị loại khỏi gợi ý, nên không thể trúng; app hiện "Lượt 4–5 sao trúng top-10" dạng trúng / tổng (ví dụ 2 / 672, 2 lượt trúng do `scripts/rate_from_recs.py`) kèm giải thích. Kế hoạch Session 8 phát lại tập test giữ riêng chưa được làm. Kết luận ở tài liệu này dựa trên đánh giá offline trên tập test.
+- **Đánh giá online trong app không phải chất lượng offline.** `online_eval` có tính vòng tròn nếu người dùng chọn sách từ chính top-10; chỉ dùng để xác nhận pipeline, không thay cho Precision@10.
+- **Fold-in chỉ tính lại vector user** trên item factors đã cố định. Sách mới và user mới vẫn cần batch train; dưới ngưỡng rating tích cực thì app dùng batch list.
 
 ## 8. Chạy lại
 
@@ -125,8 +131,13 @@ Với mô hình mới, mỗi người nhận một danh sách khác nhau, dù c�
 docker compose exec spark python batch/train_als.py                     # explicit + baseline (RMSE, Precision@10)
 docker compose exec spark python batch/train_als.py --implicit --ranks 20,50 --regs 0.1 --alphas 1,10
 docker compose exec spark python batch/write_recs.py --books data/goodbooks/books.csv          # mặc định: als_implicit
+docker compose exec spark python scripts/foldin_eval.py --eval-users 1000
 docker compose restart app                                              # để Streamlit nạp lại code nếu vừa sửa app.py
 ```
+
+Để so ngưỡng 3 và 4, chạy cùng lệnh train lần lượt với `docker compose exec -e ALS_MIN_RATING=3 ...` và
+`docker compose exec -e ALS_MIN_RATING=4 ...`, rồi đối chiếu report. `foldin_eval.py` phát lại một nửa của test split
+và đánh giá trên nửa còn lại; đây là mô phỏng offline, không phải người dùng thật hay cam kết độ trễ production.
 
 Quay về mô hình cũ: `docker compose exec spark python batch/write_recs.py --books data/goodbooks/books.csv --model als`.
 

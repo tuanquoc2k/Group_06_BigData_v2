@@ -7,9 +7,10 @@
 Batch results (recommendations, models, reports/) are kept. Ratings that came in through the stream stay in
 data/parquet/ratings until batch/clean.py runs again (run_pipeline.sh does that).
 
-    docker compose exec spark python scripts/reset_streaming.py     # or: bash scripts/reset_streaming.sh --yes
+    docker compose exec spark python scripts/reset_streaming.py --yes
 The app page "Điều khiển demo" (/setting) runs this through scripts/control_server.py.
 """
+import argparse
 import shutil
 import time
 
@@ -19,11 +20,20 @@ from kafka.errors import UnknownTopicOrPartitionError
 from common.settings import CHECKPOINT_DIR, KAFKA_BOOTSTRAP, KAFKA_TOPIC, STREAM_EVENTS_DIR, get_db
 from common.stream_job import stop_stream
 
-CHECKPOINTS = ["stream_valid", "stream_rejected", "stream_trending", "stream_events_archive", "stream_events"]
-COLLECTIONS = ["rating_stats", "user_seen", "online_eval", "stream_state", "trending"]
+CHECKPOINTS = ["stream_valid", "stream_rejected", "stream_events_archive", "stream_events"]
+COLLECTIONS = [
+    "rating_stats", "user_seen", "user_ratings", "recommendation_jobs", "recs_live",
+    "online_eval", "stream_state",
+]
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--yes", action="store_true", help="confirm deletion of stream data and state")
+    args = parser.parse_args()
+    if not args.yes:
+        parser.error("refusing to delete stream data without --yes confirmation")
+
     print("[1/5] stop a running stream job (if any)")
     # Wait until it has really stopped, so no batch commits into a checkpoint we are about to delete
     print("  " + stop_stream())

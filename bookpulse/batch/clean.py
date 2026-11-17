@@ -44,14 +44,18 @@ def main():
     started = time.time()
 
     raw = spark.read.csv(args.input, header=True)
-    typed = raw.select(
+    typed = raw.withColumn("source_order", F.monotonically_increasing_id()).select(
         F.col("user_id").cast("int").alias("user_id"),
         F.col("book_id").cast("int").alias("book_id"),
         F.col("rating").cast("int").alias("rating"),
+        "source_order",
     )
     valid = typed.dropna().filter(F.col("rating").between(1, 5)).cache()
     # source 0 = CSV (no timestamp), 1 = stream (has event_time); higher source and later time win
-    combined = valid.withColumn("event_time", F.lit(None).cast("timestamp")).withColumn("source", F.lit(0))
+    combined = (valid.withColumn("event_time", F.lit(None).cast("timestamp"))
+                .withColumn("ingested_at", F.lit(None).cast("timestamp"))
+                .withColumn("event_id", F.lit(None).cast("string"))
+                .withColumn("source", F.lit(0)))
 
     stream_report = None
     if has_parquet(args.stream_events):
@@ -61,6 +65,10 @@ def main():
         archived = spark.read.parquet(args.stream_events)
         if "simulated" not in archived.columns:  # archives written before the field existed
             archived = archived.withColumn("simulated", F.lit(None).cast("boolean"))
+        if "ingested_at" not in archived.columns:  # older archive schema
+            archived = archived.withColumn("ingested_at", F.lit(None).cast("timestamp"))
+        if "source_order" not in archived.columns:
+            archived = archived.withColumn("source_order", F.lit(None).cast("long"))
         archived = archived.filter(F.col("rating").between(1, 5)).cache()
         # one row per event; simulated may be null on old archives: count it as simulated (unknown origin)
         deduped = (archived.dropDuplicates(["event_id"])
@@ -68,7 +76,8 @@ def main():
         n_simulated = deduped.filter(F.col("simulated")).count()
         n_real = deduped.count() - n_simulated
         kept = deduped.filter(~F.col("simulated")) if args.exclude_simulated else deduped
-        events = kept.select("user_id", "book_id", "rating", "event_time").cache()
+        events = kept.select("user_id", "book_id", "rating", "event_time", "ingested_at", "event_id",
+                             "source_order").cache()
         stream_pairs = events.select("user_id", "book_id").distinct()
         csv_pairs = valid.select("user_id", "book_id").distinct()
         overlapping = stream_pairs.join(csv_pairs, ["user_id", "book_id"]).count()
@@ -88,7 +97,9 @@ def main():
         combined = combined.unionByName(events.withColumn("source", F.lit(1)))
 
     latest_first = Window.partitionBy("user_id", "book_id").orderBy(
-        F.desc("source"), F.desc_nulls_last("event_time"))
+        F.desc("source"), F.desc_nulls_last("event_time"),
+        F.desc_nulls_last("ingested_at"), F.desc_nulls_last("event_id"),
+        F.desc_nulls_last("source_order"))
     clean = (combined.withColumn("rn", F.row_number().over(latest_first))
              .filter(F.col("rn") == 1)
              .select("user_id", "book_id", "rating", (F.col("source") == 1).alias("from_stream")))

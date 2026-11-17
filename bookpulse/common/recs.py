@@ -3,6 +3,8 @@ read the served list back (visible_top10: the same rule as the app page)."""
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
+from common.settings import ALS_MIN_RATING
+
 
 def explode_recs(raw):
     """ALS recommendForUserSubset/AllUsers output -> rows of (user_id, book_id, score)."""
@@ -13,7 +15,7 @@ def explode_recs(raw):
 
 def top_k_unseen(candidates, seen, k):
     """Keep the k best-scored candidates per user after removing books the user already rated."""
-    w = Window.partitionBy("user_id").orderBy(F.desc("score"))
+    w = Window.partitionBy("user_id").orderBy(F.desc("score"), F.asc("book_id"))
     return (
         candidates.join(seen, ["user_id", "book_id"], "left_anti")
         .withColumn("rank", F.row_number().over(w))
@@ -21,19 +23,30 @@ def top_k_unseen(candidates, seen, k):
     )
 
 
-def split_train_test(ratings, test_ratio, seed):
+def split_train_test(ratings, test_ratio, seed, min_rating=ALS_MIN_RATING):
     """Train/test split used by train_als.py. Returns (train, test, number of streamed ratings in train).
 
-    The Goodbooks CSV has no rating timestamps, so CSV ratings are split at random (seeded, reproducible).
-    Ratings that came through the stream (from_stream = true, written by clean.py) are the newest data and
-    the reason to retrain, so they always go to train: the served model must learn them, and a random split
-    would hold about test_ratio of them out. Parquet from an older clean.py has no from_stream column.
+    Only positive ratings are training/evaluation signals. CSV rows are randomly held out per user;
+    streamed ratings are newest and always stay in train. Parquet from an older clean.py has no from_stream.
     """
     if "from_stream" not in ratings.columns:
         ratings = ratings.withColumn("from_stream", F.lit(False))
-    csv_ratings = ratings.filter(~F.col("from_stream")).select("user_id", "book_id", "rating")
-    streamed = ratings.filter(F.col("from_stream")).select("user_id", "book_id", "rating")
-    train_csv, test = csv_ratings.randomSplit([1 - test_ratio, test_ratio], seed=seed)
+    positive = ratings.filter(F.col("rating") >= min_rating)
+    csv_ratings = positive.filter(~F.col("from_stream")).select("user_id", "book_id", "rating")
+    streamed = positive.filter(F.col("from_stream")).select("user_id", "book_id", "rating")
+    user_window = Window.partitionBy("user_id")
+    order_window = Window.partitionBy("user_id").orderBy(F.rand(seed), F.asc("book_id"))
+    ranked = (csv_ratings.withColumn("_user_count", F.count("*").over(user_window))
+              .withColumn("_rank", F.row_number().over(order_window))
+              .withColumn("_test_count", F.when(F.col("_user_count") > 1,
+                                                F.greatest(F.lit(1), F.least(
+                                                    F.col("_user_count") - 1,
+                                                    F.floor(F.col("_user_count") * test_ratio).cast("int"))))
+                          .otherwise(F.lit(0))))
+    train_csv = ranked.filter(F.col("_rank") <= F.col("_user_count") - F.col("_test_count")).select(
+        "user_id", "book_id", "rating")
+    test = ranked.filter(F.col("_rank") > F.col("_user_count") - F.col("_test_count")).select(
+        "user_id", "book_id", "rating")
     return train_csv.unionByName(streamed), test, streamed.count()
 
 
@@ -44,9 +57,12 @@ def visible_top10(db, user_id, k=10):
     if meta is None:
         return {"model_version": None, "recs_collection": None, "top10": []}
     seen = {d["book_id"] for d in db.user_seen.find({"user_id": user_id}, {"book_id": 1})}
+    live = db.recs_live.find_one({"_id": user_id, "model_version": meta["model_version"]})
     doc = db[meta["recs_collection"]].find_one({"_id": user_id})
-    recs = [r for r in (doc["recs"] if doc else []) if r["book_id"] not in seen][:k]
+    source = "als-foldin" if live else "batch"
+    recs = [r for r in ((live or doc or {}).get("recs", [])) if r["book_id"] not in seen][:k]
     titles = {b["_id"]: b.get("title") for b in db.books.find({"_id": {"$in": [r["book_id"] for r in recs]}})}
     return {"model_version": meta["model_version"], "recs_collection": meta["recs_collection"],
-            "top10": [{"rank": i + 1, "book_id": r["book_id"], "score": r["score"], "title": titles.get(r["book_id"])}
-                      for i, r in enumerate(recs)]}
+            "source": source,
+            "top10": [{"rank": i + 1, "book_id": r["book_id"], "score": r.get("score"),
+                       "title": titles.get(r["book_id"])} for i, r in enumerate(recs)]}

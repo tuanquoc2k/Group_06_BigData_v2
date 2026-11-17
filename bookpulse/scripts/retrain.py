@@ -30,7 +30,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from common.recs import visible_top10
-from common.settings import DATA_DIR, REPORT_DIR, ROOT, STREAM_EVENTS_DIR, get_db, save_report
+from common.settings import (
+    ALS_EVAL_USERS, ALS_RANKS, ALS_REGS, ALS_ALPHAS, DATA_DIR, REPORT_DIR, ROOT,
+    STREAM_EVENTS_DIR, get_db, save_report,
+)
 from common.stream_job import STREAM_JOB, stop_stream, stream_running
 
 STREAM_LOG = Path("/tmp/bookpulse-control/stream_restart.log")
@@ -79,7 +82,7 @@ def step(name, argv, timings):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--user", type=int, default=1, help="user whose top-10 is recorded before and after")
-    parser.add_argument("--eval-users", type=int, default=1000,
+    parser.add_argument("--eval-users", type=int, default=ALS_EVAL_USERS,
                         help="users sampled for Precision@10 on the test set (fewer = faster)")
     parser.add_argument("--exclude-simulated", action="store_true",
                         help="drop streamed events marked simulated=true (demo ratings) from the training data")
@@ -110,8 +113,11 @@ def main():
         clean_args = ["batch/clean.py"] + (["--exclude-simulated"] if args.exclude_simulated else [])
         step("clean", clean_args, timings)
         clean = newest_report("clean")
-        step("train_als_implicit", ["batch/train_als.py", "--implicit", "--ranks", "50", "--regs", "0.1",
-                                    "--alphas", "1", "--eval-users", str(args.eval_users)], timings)
+        step("train_als_implicit", [
+            "batch/train_als.py", "--implicit", "--ranks", ALS_RANKS,
+            "--regs", ALS_REGS, "--alphas", ALS_ALPHAS,
+            "--eval-users", str(args.eval_users),
+        ], timings)
         train = newest_report("train_als_implicit")
         step("write_recs", ["batch/write_recs.py", "--books", args.books], timings)
         recs = newest_report("write_recs")

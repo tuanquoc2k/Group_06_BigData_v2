@@ -1,10 +1,10 @@
-"""Download Goodbooks-10k (ratings.csv, books.csv) into data/goodbooks/."""
+"""Download Goodbooks-10k ratings, books and genre-tag tables into data/goodbooks/."""
 import urllib.request
 
 from common.settings import DATA_DIR
 
 BASE = "https://raw.githubusercontent.com/zygmuntz/goodbooks-10k/master/"
-FILES = ["ratings.csv", "books.csv"]
+FILES = ["ratings.csv", "books.csv", "book_tags.csv", "tags.csv"]
 
 
 def main():

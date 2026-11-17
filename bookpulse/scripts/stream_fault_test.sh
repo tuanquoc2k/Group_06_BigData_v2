@@ -8,7 +8,7 @@
 #   4. 15 s later restart the job from the same checkpoints; it runs until the producer is done
 #   5. scripts/kafka_audit.py counts the topic and checks MongoDB:
 #        valid counted == distinct valid - late,  rating_stats sum == valid counted,
-#        rejected == invalid,  trending sum == 2 x (valid - late)
+#        rejected == invalid; current user_rating pairs match the recomputed rating_stats total
 # Logs go to reports/streaming/fault_test_<timestamp>/, the check to reports/kafka_audit_<timestamp>.json.
 # Takes about 3 minutes. Run from bookpulse/ on the host:   bash scripts/stream_fault_test.sh
 set -euo pipefail
@@ -47,6 +47,6 @@ wait $JOB2 || true
 echo "$(ts) job #2 stopped; checking against Kafka"
 
 docker compose exec -T spark python scripts/kafka_audit.py | tee "$OUT/audit.log" | grep -E \
-  '"messages"|distinct_valid|invalid_messages|valid_events_counted|expected_|sum_n_ratings|rejected_events_counted|_match|no_loss'
+  '"messages"|distinct_valid|invalid_messages|valid_events_counted|expected_|sum_unique_pairs|rejected_events_counted|_match|no_loss|kafka_offset_loss'
 grep -h "stream_progress_" "$OUT"/job*.log | sed 's/.*progress -> /progress file: /' || true
 echo "$(ts) done -> $OUT"

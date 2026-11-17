@@ -4,13 +4,21 @@ services:
   mongo:
     image: mongo:7.0.14   # pinned: the floating mongo:7.0 tag pulled on 2026-11-04 had an empty entrypoint
     command: ["--wiredTigerCacheSizeGB", "0.5"]   # leave memory for Spark
+    restart: unless-stopped
     ports:
       - "27017:27017"
     volumes:
       - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
   kafka:
     image: apache/kafka:3.8.0
+    restart: unless-stopped
     ports:
       - "9094:9094"   # for tools running on the host machine
     environment:
@@ -27,12 +35,19 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_NUM_PARTITIONS: 3
+      KAFKA_LOG_RETENTION_MS: ${KAFKA_LOG_RETENTION_MS:-604800000}
       KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
       # Keep the log on a named volume: without it the topic lives in the container and
       # `docker compose down` deletes it while the Spark checkpoints (another volume) survive.
       KAFKA_LOG_DIRS: /var/lib/kafka/data
     volumes:
       - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
 
   # Workbench: every Spark job, the producer and helper scripts run here with `docker compose exec spark ...`.
   # Its main process is a small control server (port 8600, compose network only) so the app page /setting can
@@ -42,6 +57,7 @@ services:
     image: bookpulse-spark:latest
     command: python scripts/control_server.py
     init: true   # reap the processes the server and `docker compose exec` start
+    restart: unless-stopped
     volumes:
       - .:/work
       - spark-checkpoints:/work/checkpoints
@@ -49,12 +65,42 @@ services:
     environment:
       MONGO_URI: mongodb://mongo:27017
       KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_LOG_RETENTION_MS: ${KAFKA_LOG_RETENTION_MS:-604800000}
       SPARK_DRIVER_MEMORY: 4g
+      ALS_MIN_RATING: ${ALS_MIN_RATING:-4}
+      ALS_RANKS: ${ALS_RANKS:-20,50}
+      ALS_REGS: ${ALS_REGS:-0.1}
+      ALS_ALPHAS: ${ALS_ALPHAS:-1,10}
+      ALS_MAX_ITER: ${ALS_MAX_ITER:-10}
+      ALS_TEST_RATIO: ${ALS_TEST_RATIO:-0.2}
+      ALS_EVAL_USERS: ${ALS_EVAL_USERS:-5000}
+      ALS_SEED: ${ALS_SEED:-42}
+      ALS_MODEL_NAME: ${ALS_MODEL_NAME:-als_implicit}
+      FOLD_IN_MIN_RATINGS: ${FOLD_IN_MIN_RATINGS:-3}
+      FOLD_IN_TOP_K: ${FOLD_IN_TOP_K:-100}
+      FOLD_IN_POLL_SECONDS: ${FOLD_IN_POLL_SECONDS:-1}
+      FOLD_IN_DEBOUNCE_SECONDS: ${FOLD_IN_DEBOUNCE_SECONDS:-0.5}
+      FOLD_IN_JOB_TIMEOUT_SECONDS: ${FOLD_IN_JOB_TIMEOUT_SECONDS:-120}
+      FOLD_IN_MAX_RETRIES: ${FOLD_IN_MAX_RETRIES:-3}
+      STREAM_TRIGGER: ${STREAM_TRIGGER:-5 seconds}
+      STREAM_WATERMARK: ${STREAM_WATERMARK:-10 minutes}
+      STREAM_MAX_OFFSETS: ${STREAM_MAX_OFFSETS:-20000}
+      STREAM_PARTITIONS: ${STREAM_PARTITIONS:-3}
+      STREAM_RESTART_SECONDS: ${STREAM_RESTART_SECONDS:-5}
+      MONGO_SERVER_SELECTION_TIMEOUT_MS: ${MONGO_SERVER_SELECTION_TIMEOUT_MS:-5000}
     ports:
       - "4040:4040"   # Spark UI while a job is running
     depends_on:
-      - mongo
-      - kafka
+      mongo:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8600/status', timeout=2).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
 
   app:
     build: .
@@ -64,13 +110,57 @@ services:
       - .:/work
     environment:
       MONGO_URI: mongodb://mongo:27017
-      KAFKA_BOOTSTRAP: kafka:9092   # the "Chấm sao" form sends rating events to Kafka
+      KAFKA_BOOTSTRAP: kafka:9092
       CONTROL_URL: http://spark:8600   # page /setting: buttons that run commands in the spark container
+      ALS_MIN_RATING: ${ALS_MIN_RATING:-4}
+      RECOMMENDATION_TOP_K: ${RECOMMENDATION_TOP_K:-100}
+      FOLD_IN_MIN_RATINGS: ${FOLD_IN_MIN_RATINGS:-3}
+      FOLD_IN_TOP_K: ${FOLD_IN_TOP_K:-100}
+      FOLD_IN_POLL_SECONDS: ${FOLD_IN_POLL_SECONDS:-1}
+      MONGO_SERVER_SELECTION_TIMEOUT_MS: ${MONGO_SERVER_SELECTION_TIMEOUT_MS:-5000}
     ports:
       - "8501:8501"
     depends_on:
-      - mongo
-      - kafka
+      mongo:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      spark:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=2).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  recommendation-worker:
+    build: .
+    image: bookpulse-spark:latest
+    command: python streaming/recommendation_worker.py
+    restart: unless-stopped
+    volumes:
+      - .:/work
+    environment:
+      MONGO_URI: mongodb://mongo:27017
+      ALS_MODEL_NAME: ${ALS_MODEL_NAME:-als_implicit}
+      ALS_MIN_RATING: ${ALS_MIN_RATING:-4}
+      FOLD_IN_MIN_RATINGS: ${FOLD_IN_MIN_RATINGS:-3}
+      FOLD_IN_TOP_K: ${FOLD_IN_TOP_K:-100}
+      FOLD_IN_POLL_SECONDS: ${FOLD_IN_POLL_SECONDS:-1}
+      FOLD_IN_DEBOUNCE_SECONDS: ${FOLD_IN_DEBOUNCE_SECONDS:-0.5}
+      FOLD_IN_JOB_TIMEOUT_SECONDS: ${FOLD_IN_JOB_TIMEOUT_SECONDS:-120}
+      FOLD_IN_MAX_RETRIES: ${FOLD_IN_MAX_RETRIES:-3}
+      MONGO_SERVER_SELECTION_TIMEOUT_MS: ${MONGO_SERVER_SELECTION_TIMEOUT_MS:-5000}
+    depends_on:
+      mongo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import pathlib; assert b'recommendation_worker.py' in pathlib.Path('/proc/1/cmdline').read_bytes()"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
 volumes:
   mongo-data:
