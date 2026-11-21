@@ -3,7 +3,7 @@
 Toàn bộ hệ thống chạy bằng Docker trên một máy: Spark (batch + Structured Streaming), Kafka, MongoDB, worker fold-in và app Streamlit;
 thành phần MapReduce chạy trên một cụm Hadoop riêng (HDFS + YARN), là nhánh kiểm chứng, xem mục 8. Hệ thống tổ chức
 theo ý tưởng Lambda: lớp batch, lớp tốc độ, lớp phục vụ; app đọc `recs_live` trước, nếu không có thì dùng batch view,
-đồng thời lọc sách trong `user_seen` và `user_ratings` sau khi trạng thái tới MongoDB. Sơ đồ tổng quan hiện tại [docs/img/architecture_overview.svg](docs/img/architecture_overview.svg)
+đồng thời lọc sách trong `user_seen` và `user_ratings` sau khi trạng thái tới MongoDB. Sơ đồ tổng quan hiện tại [docs/img/architecture_overview.png](docs/img/architecture_overview.png)
 (slide 4), chi tiết [docs/img/architecture_detail.png](docs/img/architecture_detail.png) (slide 5) và bản
 tương tác [docs/kien-truc.html](docs/kien-truc.html).
 
@@ -103,7 +103,7 @@ Luồng streaming không cần gõ lệnh: trang **Điều khiển demo** (http:
 streaming, gửi dữ liệu mô phỏng qua Kafka (có thể chèn sự kiện trễ), chạy `kafka_audit.py` / `nosql_evidence.py`,
 train lại model batch và xóa dữ liệu streaming thử nghiệm trong khu vực bảo trì có xác nhận
 (`scripts/retrain.py`: dừng job streaming → `clean.py` gộp kho sự kiện → `train_als.py --implicit` một bộ tham số →
-`write_recs.py` chuyển phiên bản → bật lại job; đo 15/11: 164–179 giây trên máy 12 core, ước 6–8 phút trên 4 core;
+`write_recs.py` chuyển phiên bản → bật lại job; đo 21/11 trên bản v2: 390 giây (clean 53, train một lần fit 196, write_recs 140);
 report `reports/retrain_*.json` ghi top-10 của một user trước/sau và thời gian từng bước), kèm trạng thái và output của từng lệnh. Các nút gọi `scripts/control_server.py`, tiến trình chính của
 container spark (cổng 8600, chỉ trong mạng compose), chỉ chạy đúng các lệnh có sẵn. Sau khi kéo bản này về, chạy
 `docker compose up -d` một lần để tạo lại container spark.
@@ -200,7 +200,7 @@ Rating thấp không ảnh hưởng vector nhưng mọi sách đã chấm đều
 bị bỏ qua và ghi log. Nếu có ít hơn `FOLD_IN_MIN_RATINGS` positive rating mới từ stream kể từ snapshot gần nhất
 (mặc định 3), worker giữ
 gợi ý batch thay vì giải vector ALS. Alpha, rank, regParam, threshold và model version được kiểm tra từ manifest;
-`FOLD_IN_MIN_RATINGS` và `FOLD_IN_TOP_K` cấu hình qua biến môi trường (mặc định 3 và 100). Sidebar cho phép nhập
+`FOLD_IN_MIN_RATINGS` và `FOLD_IN_TOP_K` cấu hình qua biến môi trường (mặc định 1 và 100). Sidebar cho phép nhập
 user ID, và trạng thái fold-in hiển thị thanh tiến độ theo pha cùng thời gian thực đã trôi qua.
 
 Các phần trong module:
@@ -225,28 +225,26 @@ docker compose exec spark python scripts/foldin_eval.py --vector-check-users 20 
 ```
 
 Báo cáo thực tế được in ra terminal và lưu thành `reports/foldin_eval_*.json`; nếu chưa chạy lệnh này trên model/dataset
-cụ thể, không có số đo nào được giả định. Vector user đã lưu của Spark có thể không trùng chính xác phép giải lại trên
-itemFactors cuối cùng vì ALS luân phiên cập nhật user/item; hãy đọc cosine similarity và sai số tuyệt đối đo được.
-Fold-in không cập nhật vector sách, không tạo vector cho sách mới và không cá nhân hóa user hoàn toàn mới nếu chưa đủ
-positive rating.
+cụ thể, không có số đo nào được giả định. Spark ALS cập nhật vector sách trước rồi vector user ở mỗi vòng, nên giải lại vector user trên itemFactors cuối cùng
+cho đúng `model.userFactors`; `train_als.py` tự kiểm tra điều này trên 20 user trước khi lưu mô hình. Phép chia
+train/test phải được cache trước khi lọc theo `user_id` (xem `common/recs.py`), nếu không phép so sẽ sai.
+Fold-in không cập nhật vector sách, không tạo vector cho sách mới và không cá nhân hóa user hoàn toàn mới nếu chưa có
+rating tích cực.
 
-**Báo cáo lịch sử** của model `20261115_173217_451302` trên 1.000 user replay (20 user kiểm tra vector; không
-đại diện model/worker đang chạy). Chạy lại các lệnh trên để tạo bằng chứng cho phiên bản hiện tại:
+**Kết quả 21/11/2026** (`reports/foldin_eval_20261121_100651.json`, mô hình `20261121_100150_952595`, 1.000 user replay).
+"Trước" là danh sách batch đã ẩn các sách vừa chấm; "sau" là fold-in từ lịch sử train cộng rating mới:
 
 | Kiểm tra | Kết quả |
 |---|---:|
-| Cosine similarity trung bình với `model.userFactors` | 0.9999999999999998 |
-| Sai số tuyệt đối lớn nhất giữa vector | 2.7462756402307775e-08 |
-| Precision@10 batch → fold-in | 0.1167 → 0.0802 |
-| Recall@10 batch → fold-in | 0.1611 → 0.1061 |
-| Top-10 Jaccard batch/fold-in | 0.1643 |
-| Một user: thời gian khuyến nghị | 0.03027 giây |
-| 1.000 user tuần tự: trung bình / p95 | 0.01169 / 0.02873 giây mỗi user |
-| 1.000 user tuần tự: tổng thời gian | 11.69683 giây |
+| Cosine similarity trung bình với `model.userFactors` (20 user) | 1,0000000 |
+| Sai số tuyệt đối lớn nhất giữa vector | 2,1e-08 |
+| Precision@10 trước → fold-in | 0,1361 → 0,1380 |
+| Recall@10 trước → fold-in | 0,1859 → 0,1882 |
+| Top-10 Jaccard trước/sau | 0,816 |
+| 1.000 user: trung bình / p95 | 0,0087 / 0,019 giây mỗi user |
 
-Fold-in khớp gần như chính xác trên mẫu train, nhưng **Precision@10 và Recall@10 giảm** trong replay này;
-fold-in không đảm bảo cải thiện chất lượng. Số đo chi tiết theo từng user nằm trong
-[`reports/foldin_eval_20261115_182747.json`](reports/foldin_eval_20261115_182747.json).
+Fold-in tái tạo đúng vector Spark và cải thiện xếp hạng một chút; lợi ích chính là gu đổi ngay sau lượt chấm thay vì
+chờ train lại. Chi tiết theo số rating mới và độ trễ end-to-end: `docs/streaming.md` mục 4–5.
 
 Để so sánh ngưỡng 3 và 4, chạy cùng cấu hình hai lần rồi đối chiếu `reports/train_als_implicit_*.json`:
 `docker compose exec -e ALS_MIN_RATING=3 spark python batch/train_als.py --implicit --ranks 50 --regs 0.1 --alphas 1`
@@ -275,7 +273,7 @@ Mỗi bước ghi một file JSON vào `reports/`:
 | `pipeline_*.json` | thời gian toàn pipeline, có gồm `write_recs.py` |
 | `stream_progress_*.json` | tiến độ ba query streaming (`valid`, `rejected`, `archive`): số batch, dòng vào, tốc độ, thời gian batch, watermark |
 | `kafka_audit_*.json` | đếm lại Kafka; đối chiếu `stream_state`, `user_ratings`, `rating_stats`, archive; liệt kê offset-loss incidents đã ghi nhận |
-| `streaming/*.png` | ảnh lịch sử Spark UI và app; ảnh app được chụp trước khi gỡ thao tác chấm sao khỏi giao diện |
+| `streaming/spark_ui_valid_20261121.png` | ảnh Spark UI của query `valid` (21/11) |
 | `streaming/fault_test_*/` | log của `scripts/stream_fault_test.sh` (thử `kill -9` job streaming) |
 | `streaming/outage_test_*/` | log của `scripts/stream_outage_test.sh` (thử ngắt Kafka và MongoDB); `events.log` là dòng thời gian |
 | `scaling/docker_stats_*.csv` | `docker stats` mỗi 5 giây khi chạy batch (RAM đỉnh) |
@@ -315,7 +313,7 @@ So sánh bốn mô hình NoSQL, lựa chọn MongoDB và phác thảo cloud (đ�
 - **Hai tốc độ cập nhật:** sự kiện chấm sao vào Kafka; streaming upsert latest `user_ratings`, giữ `user_seen` để ẩn sách
   ngay và gộp job; recommendation worker tính lại vector user trên item factors cố định rồi upsert `recs_live`. App đọc
   live trước, rồi batch. Worker kết hợp lịch sử trong `user_profiles_<version>` với rating stream mới nhất; cần ít nhất
-  `FOLD_IN_MIN_RATINGS` (mặc định 3) rating stream tích cực (>= `ALS_MIN_RATING`, mặc định 4) cho các sách khác nhau
+  `FOLD_IN_MIN_RATINGS` (mặc định 1) rating stream tích cực (>= `ALS_MIN_RATING`, mặc định 4) cho các sách khác nhau
   trước khi giải vector fold-in.
   User chưa có tín hiệu phù hợp và sách mới vẫn dùng danh sách
   khởi đầu/batch/phổ biến. Tab **Dành cho bạn** hiển thị pending, processing, hoàn tất hoặc lỗi và tự làm mới khi thành công.
@@ -335,7 +333,7 @@ So sánh bốn mô hình NoSQL, lựa chọn MongoDB và phác thảo cloud (đ�
   lấy rating mới hơn. Report `clean_*.json` ghi số dòng lưu trữ, số sự kiện sau bỏ trùng, số cặp cập nhật/mới.
   Vòng này đã chạy thật ngày 06/11 (`reports/clean_20261106_122043.json` gộp 4.901 dòng), nhưng `reset_streaming.sh`
   xóa kho `stream_events` trước mỗi lượt demo/thử, nên lần làm sạch của mô hình cuối (`clean_20261106_123904.json`)
-  có `stream_events` = null: mô hình cuối (P@10 0,204) được huấn luyện không có sự kiện streaming. Kho giữ sự kiện cho
+  có `stream_events` = null. Mô hình đang phục vụ của bản v2 (21/11, `clean_20261121_095846.json`) cũng huấn luyện không có sự kiện streaming, vì kho đã reset trước khi train. Kho giữ sự kiện cho
   lần huấn luyện sau cho đến khi chạy `reset_streaming.sh`; production: kho sự kiện là dữ liệu gốc bất biến, không reset.
   `producer.py` và `rate_from_recs.py` đánh dấu `simulated=true`. `clean.py` mặc định gộp cả sự
   kiện mô phỏng (để demo được vòng chấm sao → huấn luyện lại → gợi ý mới) và bỏ chúng khi chạy với `--exclude-simulated`;

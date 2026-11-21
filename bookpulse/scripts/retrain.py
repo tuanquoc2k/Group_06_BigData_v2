@@ -6,8 +6,8 @@ the whole loop once, inside the spark container, and records what changed:
      sent meanwhile wait in Kafka and are read from the checkpoint when the job starts again)
   2. batch/clean.py          CSV + archive data/parquet/stream_events -> Parquet (dedup by event_id,
                              one rating per (user, book), from_stream = true)
-  3. batch/train_als.py      --implicit with the parameters chosen on validation on 06/11 (rank 50,
-                             regParam 0.1, alpha 1): ONE fit, no grid, so the step takes minutes
+  3. batch/train_als.py      --implicit with the parameters of the model being served (chosen on
+                             validation by run_pipeline.sh: rank 50, regParam 0.1, alpha 1): ONE fit, no grid
   4. batch/write_recs.py     new collection recommendations_<version>, meta.active switched when complete
   5. start the stream job again, if it was running at step 1
 The top-10 of --user, as the app shows it (stored recs minus user_seen), is read before and after, and the
@@ -32,7 +32,7 @@ from pathlib import Path
 from common.recs import visible_top10
 from common.settings import (
     ALS_EVAL_USERS, ALS_RANKS, ALS_REGS, ALS_ALPHAS, DATA_DIR, REPORT_DIR, ROOT,
-    STREAM_EVENTS_DIR, get_db, save_report,
+    STREAM_EVENTS_DIR, current_model, get_db, save_report,
 )
 from common.stream_job import STREAM_JOB, stop_stream, stream_running
 
@@ -113,9 +113,15 @@ def main():
         clean_args = ["batch/clean.py"] + (["--exclude-simulated"] if args.exclude_simulated else [])
         step("clean", clean_args, timings)
         clean = newest_report("clean")
+        # One fit with the parameters of the model being served (chosen on validation by the full pipeline);
+        # the grid belongs to run_pipeline.sh, not to this on-demand button.
+        _, active_manifest = current_model("als_implicit")
+        ranks = str(active_manifest.get("rank", ALS_RANKS))
+        regs = str(active_manifest.get("regParam", ALS_REGS))
+        alphas = str(active_manifest.get("alpha", ALS_ALPHAS))
         step("train_als_implicit", [
-            "batch/train_als.py", "--implicit", "--ranks", ALS_RANKS,
-            "--regs", ALS_REGS, "--alphas", ALS_ALPHAS,
+            "batch/train_als.py", "--implicit", "--ranks", ranks,
+            "--regs", regs, "--alphas", alphas,
             "--eval-users", str(args.eval_users),
         ], timings)
         train = newest_report("train_als_implicit")

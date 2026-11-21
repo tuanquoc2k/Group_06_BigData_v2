@@ -35,7 +35,7 @@ lại vector user trên item factors bất biến. Đây là fold-in inference, 
 
 - Mỗi rating hợp lệ được lưu làm trạng thái mới nhất cho cặp user–sách. Rating đến sau thay thế giá trị hiện tại.
 - Rating đạt `ALS_MIN_RATING` (mặc định 4) là tín hiệu thích để fold-in. Rating thấp không tham gia tính vector, nhưng vẫn được đưa vào danh sách sách đã xem để không đề xuất lại.
-- Mặc định `FOLD_IN_MIN_RATINGS=3`: user cần rating stream cho ba sách khác nhau mới từ 4 sao trở lên kể từ snapshot gần nhất, trước khi worker giải lại vector ALS. Trước ngưỡng này app giữ gợi ý hiện tại và báo tiến độ; rating 1–3 vẫn chỉ đánh dấu sách đã xem.
+- Mặc định `FOLD_IN_MIN_RATINGS=1`: chỉ cần một rating stream mới từ 4 sao trở lên kể từ snapshot gần nhất là worker giải lại vector ALS (có thể nâng ngưỡng qua biến môi trường). Trước ngưỡng này app giữ gợi ý hiện tại và báo tiến độ; rating 1–3 vẫn chỉ đánh dấu sách đã xem.
 - Worker cập nhật `recs_live`; Streamlit theo dõi các pha gửi Kafka → chờ job → xử lý → có kết quả, hiển thị thời gian chờ và nạp lại 100 gợi ý trong riêng lưới sách sau khi hoàn tất. Danh sách chia 8 sách/trang, có lọc thể loại và sắp xếp.
 - Genre chỉ là metadata dùng để hiển thị, lọc và sắp xếp danh sách 100 gợi ý; không thay đổi điểm ALS.
 - Job và kết quả được gắn model version. Rating mới nhất và toàn bộ sách đã chấm được dùng để ngăn gợi ý lặp.
@@ -60,58 +60,55 @@ Compose có healthcheck và restart policy cho các dịch vụ. Query streaming
 
 ## 4. Trạng thái bằng chứng
 
-Các report được gắn nhãn theo lần chạy thực tế. Report có `run_metadata.commit_hash` ghi revision nền; `working_tree_dirty=true` nghĩa là lượt chạy dùng thay đổi chưa commit. Kết quả lịch sử không được dùng làm xác nhận cho code mới.
+Mọi số dưới đây đo ngày 21/11/2026 trên code v2 hiện tại, mô hình `20261121_071127_693046`, sau đó nút Train lại tạo phiên bản `20261121_100150_952595` với cùng tham số và cùng kết quả (giờ trong tên file là UTC). Lần chạy đầu cùng ngày, trước khi sửa bước kiểm tra vector và phép chia train/test, nằm ở `reports/superseded/v2_first_model_20261121/` kèm README; không dùng số của nó.
 
-| Thành phần | Trạng thái | Bằng chứng gần nhất trong repo | Ghi chú |
+| Thành phần | Trạng thái | Bằng chứng | Ghi chú |
 |---|---|---|---|
-| Batch clean / SQL / ALS / write-recs | ◐ Lịch sử | `reports/clean_20261116_034934.json`, `reports/analytics_sql_20261115_132952.json`, `reports/train_als_implicit_20261116_035334.json`, `reports/write_recs_20261116_035549.json` | Chưa chạy lại trong lượt này; không dùng làm chứng cứ cho các sửa đổi worker. |
-| Fold-in offline và vector | ✓ Đã chạy | `reports/foldin_eval_20261116_092620.json` | 1.000 user; vector so khớp 20 user; có Precision/Recall theo 1/2/3/5/10 positive ratings. |
-| Rating trong/ngoài top-10 | ✓ Đã chạy | `reports/foldin_diagnostic_20261116_091506.json` | Cả hai job `done`, `als-foldin`; vector đổi; sách vừa chấm bị lọc khỏi app top-10. |
-| Latency end-to-end | ✓ Đã chạy | `reports/stream_latency_20261116_091624.json` | 100/100 event hoàn tất, 0 timeout; số đo mô phỏng, không phải cam kết production. |
-| Streaming ingest / Kafka audit | ✓ Đã chạy | `reports/kafka_audit_20261116_094508.json`, `reports/kafka_audit_20261116_093943.json` | Producer sạch: 3.000 / 3.000 valid event được đếm, 19 invalid bị reject; archive khớp 3.059 valid messages (có duplicate); 0 offset gap được ghi nhận. Đây không phải thử nghiệm retention loss. |
-| Kafka / Mongo outage | ✓ Đã chạy | `reports/streaming/outage_test_20261116_164126/result.json`, `reports/kafka_audit_20261116_094508.json` | Kafka dừng 40 giây, Mongo dừng 30 giây; sau phục hồi 3.000 rating hiện hành, 0 job pending/processing/failed. Một lượt mô phỏng trên cấu hình local. |
-| Worker lease recovery | ✓ Đã chạy | `reports/streaming/worker_recovery/worker_recovery_20261116_164706.json` | Khôi phục synthetic job có lease hết hạn sau restart; đây không phải kill worker giữa lúc tính toán. |
-| Worker / Spark restart fault test | ✓ Đã chạy | `reports/streaming/fault_test_20261116_163751/result.json`, `reports/kafka_audit_20261116_093943.json` | Spark bị dừng/khởi động lại từ checkpoint; 1.500 / 1.500 distinct valid event được đếm, duplicate không làm tăng số đếm. |
-| Hadoop MapReduce ↔ Spark | ◐ Lịch sử | `reports/mapreduce_verify_20261105_170058.json` | Chưa chạy lại trong lượt này. |
-| Toàn bộ pytest | ✓ Đã chạy | `docker compose exec -T spark pytest -q -p no:cacheprovider` | 54 passed sau thay đổi worker và test. |
+| Batch clean / SQL / ALS / write-recs | ✓ Đã chạy | `reports/clean_20261121_062652.json`, `analytics_sql_20261121_062739.json`, `train_als_implicit_20261121_071137.json`, `write_recs_20261121_071405.json`, `pipeline_20261121_064931.json` | Pipeline đầy đủ 1.408 giây. `train_als.py` tự kiểm tra fold-in tái tạo đúng `userFactors` của 20 user (sai số 2,3e-8) trước khi lưu. |
+| Đánh giá xếp hạng | ✓ Đã chạy | `evidence/session9/E_model_validation.json`, `G1_implicit_semantics.json` | 5.000 user test: P@10 0,248, Recall@10 0,168, NDCG@10 0,293 so với sách phổ biến 0,074 / 0,050 / 0,091; ngưỡng ≥ 3 sao cho P@10 0,215. |
+| Fold-in offline và vector | ✓ Đã chạy | `reports/foldin_eval_20261121_072720.json` | 1.000 user; vector so khớp 20 user (sai số 2,1e-8); bảng ở mục 5. |
+| Rating trong/ngoài top-10 | ✓ Đã chạy | `reports/foldin_diagnostic_20261121_073553.json` | Cả hai job `done`, `als-foldin`; vector đổi; sách vừa chấm bị loại khỏi top-10 app. |
+| Lượt demo user 1 | ✓ Đã chạy | `reports/demo_trace_user1_20261121_073722.json`, `_101528.json` | Chấm 5 sao *The Great Gatsby* → 8,0 và 9,1 giây sau `als-foldin`, hai sách mới vào top-10. |
+| Nút Train lại | ✓ Đã chạy | `reports/retrain_20261121_100422.json` | 390 giây: clean 53, train một lần fit 196 (fit 90), write_recs 140; P@10 vẫn 0,248, fold-in khớp 2,3e-8. |
+| Latency end-to-end | ✓ Đã chạy | `reports/stream_latency_20261121_073152.json`, `_073528.json` | 100/100 event hoàn tất, 0 timeout; số đo mô phỏng, không phải cam kết production. |
+| Streaming ingest / Kafka audit | ✓ Đã chạy | `reports/kafka_audit_20261121_073750.json` | 1.101 = 1.113 hợp lệ − 12 trễ; 989 cặp `user_ratings` = tổng `rating_stats`; 11 lỗi; kho Parquet 1.136 = 1.136. |
+| Spark kill -9 fault test | ✓ Đã chạy | `reports/streaming/fault_test_20261121_142753/`, `reports/kafka_audit_20261121_073115.json` | 1.474 = 1.500 − 26 trễ; 15 lỗi; kho Parquet 1.532 = 1.532 (exactly-once); 0 offset gap. |
+| Kafka / Mongo outage | ✓ Đã chạy | `reports/streaming/outage_test_20261121_171048/`, `reports/kafka_audit_20261121_101453.json` | Kafka tắt 44 giây, MongoDB 31 giây khi producer gửi 3.000 sự kiện; job streaming vẫn chạy qua cả hai lần; 3.000 = 3.000, 19 lỗi, kho Parquet 3.059 = 3.059. |
+| Hadoop MapReduce ↔ Spark | ◐ Lịch sử | `reports/mapreduce_verify_20261105_170058.json` | Code MapReduce không đổi; chưa chạy lại. |
+| Toàn bộ pytest | ✓ Đã chạy | `docker compose exec -T spark python -m pytest -q -p no:cacheprovider tests` | 55 passed. |
 
-## 5. Đo lường đã lưu (kết quả lịch sử)
+## 5. Đo lường đã lưu
 
-**Baseline fold-in offline ngày 16/11/2026**, model `20261116_035325_280940`; các bảng phía dưới là kết quả của report mới `foldin_eval_20261116_092620.json` sau thay đổi worker:
+**Fold-in offline** (`foldin_eval_20261121_072720.json`). Với mỗi user trong 1.000 user, một nửa sách test được "chấm lại" (replay), nửa còn lại là mục tiêu. "Trước" là danh sách batch đã ẩn các sách vừa chấm (cách bản cũ làm); "sau" là fold-in từ lịch sử train cộng các rating replay (cách worker làm).
 
 | Kiểm chứng | Số đo |
 |---|---:|
-| Replay offline, số user / replay / target ratings | 1.000 / 7.793 / 7.276 |
-| Vector khớp Spark `userFactors`, 20 user: cosine trung bình / max absolute error | 0.9999999999999997 / 2.0158e-08 |
-| Precision@10, batch → fold-in | 0.1166 → 0.0802 |
-| Recall@10, batch → fold-in | 0.1609 → 0.1070 |
-| Top-10 Jaccard batch/fold-in | 0.1675 |
-| Fold-in, 1.000 user: mean / p95 | 0.00942 / 0.02816 giây/user |
-| Tuần tự 1.000 user: mean / p95 / tổng | 0.00882 / 0.02710 giây/user / 8.82 giây |
+| Số user / replay / target ratings | 1.000 / 7.793 / 7.276 |
+| Vector khớp Spark `userFactors`, 20 user: cosine / sai số tuyệt đối lớn nhất | 1,0000000 / 2,1e-08 |
+| Precision@10, trước → sau | 0,1361 → 0,1380 |
+| Recall@10, trước → sau | 0,1859 → 0,1882 |
+| Top-10 Jaccard trước/sau | 0,816 |
+| Fold-in, 1.000 user: trung bình / p95 | 0,0087 / 0,019 giây/user |
 
-| Positive ratings trong fold-in | User | Precision@10 batch → fold-in | Recall@10 batch → fold-in |
+| Rating thích mới | User | Precision@10 trước → sau | Recall@10 trước → sau |
 |---:|---:|---:|---:|
-| 1 | 1.000 | 0.1191 → 0.0408 | 0.1642 → 0.0564 |
-| 2 | 998 | 0.1216 → 0.0504 | 0.1669 → 0.0713 |
-| 3 | 984 | 0.1243 → 0.0595 | 0.1696 → 0.0820 |
-| 5 | 903 | 0.1331 → 0.0739 | 0.1730 → 0.0962 |
-| 10 | 239 | 0.1778 → 0.1218 | 0.1672 → 0.1137 |
+| 1 | 1.000 | 0,1243 → 0,1246 | 0,1718 → 0,1730 |
+| 2 | 998 | 0,1265 → 0,1274 | 0,1742 → 0,1745 |
+| 3 | 984 | 0,1289 → 0,1307 | 0,1770 → 0,1793 |
+| 5 | 903 | 0,1381 → 0,1403 | 0,1794 → 0,1831 |
+| 10 | 239 | 0,1908 → 0,1941 | 0,1813 → 0,1842 |
 
-Fold-in khớp vector user train rất sát trong các mẫu đã đo, nhưng chất lượng ranking giảm ở cả 5 nhóm; đây là số đo
-thực nghiệm, không phải bảo đảm fold-in cải thiện Precision/Recall.
+Fold-in tái tạo đúng vector Spark và cải thiện xếp hạng một chút ở cả năm nhóm, tăng dần theo số rating mới. Mức tăng nhỏ vì danh sách "trước" đã ẩn sách vừa chấm; lợi ích chính là gu đổi ngay thay vì chờ train lại. Đây là mô phỏng offline trên tập holdout, không phải đánh giá người dùng thật.
 
-End-to-end với 100 user test riêng biệt (`stream_latency_20261116_091624.json`): đủ 100 event, 0 timeout. Gửi →
-quan sát `recs_live` mean 5.15 giây, trung vị 5.17, p95 6.01; event → recommendation p95 5.91; ingestion mean
-2.82 giây. Worker fold-in mean 0.00636 giây (p95 0.01944), ranking mean 0.00440 (p95 0.00744), ghi snapshot
-Mongo mean 0.00146 (p95 0.00302; có số đo cho 99/100 event). Đây là tải mô phỏng theo batch, không phải benchmark
-production; phép đo gửi → live gồm cả polling 0.1 giây.
+**End-to-end với 100 user test** gửi cùng lúc: đủ 100 event, 0 timeout ở cả hai lần đo. Gửi → `recs_live`: trung vị 8,59 giây, p95 9,40 (`stream_latency_20261121_073152.json`) và trung vị 21,81 giây, p95 23,11 (`_073528.json`, job vừa khởi động, batch đầu chậm). Phép tính fold-in trung vị khoảng 4 ms, ghi Mongo dưới 3 ms; thời gian còn lại là chờ trigger 5 giây và hàng đợi của một worker. Một user chấm riêng lẻ (lượt demo): 5,0 và 8,0 giây.
 
-Trace mới trên hai user test khác nhau (`foldin_diagnostic_20261116_091506.json`): rating sách trong top-10 làm đổi
-vector (`delta norm` 0.1441, cosine trước/sau 0.9496, Jaccard danh sách 0.5385); rating sách ngoài top-10 cũng làm
-đổi vector (`delta norm` 0.1296, cosine 0.8418, Jaccard 0.6667). Cả hai job hoàn tất bằng `als-foldin`, và sách vừa
-chấm bị loại khỏi top-10 app. Hai lượt test xác nhận đúng đường đi ở hai trường hợp, không chứng minh hành vi cho mọi user.
+**Trace hai user test** (`foldin_diagnostic_20261121_073553.json`): chấm sách đang trong top-10 làm đổi vector (delta norm 0,145, cosine trước/sau 0,940, Jaccard top-10 0,667); chấm sách ngoài top-10 cũng đổi vector (0,166, 0,770, Jaccard 0,538). Cả hai job hoàn tất bằng `als-foldin`, sách vừa chấm bị loại khỏi top-10 app.
 
-Fault test mới dừng và khởi động lại Spark từ checkpoint sau khi gửi 1.500 sự kiện; 24 event trễ không vào trạng thái rating, còn archive giữ 1.537 valid messages gồm bản lặp. Lượt outage riêng gửi 3.000 valid event khi Kafka và Mongo lần lượt gián đoạn; sau phục hồi các 3.000 cặp rating được ghi, job đã xử lý hết. Đây là các lượt mô phỏng đơn lẻ trên máy local, không phải chứng minh HA hay retention-loss thật. Report cũ trước reset vẫn được giữ làm lịch sử và không dùng làm xác nhận.
+**Fault test** (`fault_test_20261121_142753/`): giết job bằng kill -9 sau 45 giây, chạy lại từ checkpoint; producer gửi 1.500 sự kiện hợp lệ (32 bản trùng, 15 lỗi, 26 trễ); MongoDB đếm 1.474 = 1.500 − 26, 15 lỗi bị loại, kho Parquet giữ đúng 1.532 tin hợp lệ. Một lượt trên máy local, không phải chứng minh HA.
+
+**Hai lỗi tìm ra khi đo lại 21/11 (đã sửa):**
+- Phép chia train/test sắp theo `rand(seed)` trong cửa sổ theo user. Khi một script lọc vài `user_id` rồi mới tính, Spark đẩy bộ lọc xuống trước cửa sổ nên `rand()` cho giá trị khác và tập train của user đó đổi; `foldin_eval.py` vì vậy so vector với sai tập train. Nay script cache phép chia trước khi lọc (ghi chú trong `common/recs.py`).
+- `measure_latency.py` và `diagnose_foldin.py` xoá user test nhưng không tính lại `rating_stats`, nên `kafka_audit.py` báo lệch. Nay dùng `common/cleanup.py`.
 
 Các lệnh đo mới (cần service healthy, model implicit active và dataset trong container) là:
 

@@ -25,7 +25,7 @@ from pyspark.ml.recommendation import ALS, ALSModel
 from pyspark.sql import functions as F
 
 from common.recs import explode_recs, split_train_test, top_k_unseen
-from common.settings import CHECKPOINT_DIR, DATA_DIR, PARQUET_DIR, ROOT, current_model, get_spark
+from common.settings import ALS_SEED, ALS_TEST_RATIO, CHECKPOINT_DIR, DATA_DIR, PARQUET_DIR, ROOT, current_model, get_spark
 
 K = 10
 OUT_DIR = ROOT / "evidence" / "session9"
@@ -65,7 +65,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--eval-users", type=int, default=5000)
     parser.add_argument("--user", type=int, default=1, help="candidate user shown for G1")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=None,
+                        help="split seed; defaults to the seed saved in the serving model manifest (ALS_SEED)")
     parser.add_argument("--candidates", type=int, default=200)
     parser.add_argument("--skip-alternative", action="store_true", help="G1: do not fit the liked-only model")
     args = parser.parse_args()
@@ -77,7 +78,11 @@ def main():
     implicit_path, implicit_manifest = current_model("als_implicit")
     explicit_path, explicit_manifest = current_model("als")
     min_rating = int(implicit_manifest.get("min_rating", 4))
-    train, test, n_streamed = split_train_test(ratings, 0.2, args.seed, min_rating)
+    # Same split as the serving model was trained on (seed and test ratio from its manifest).
+    if args.seed is None:
+        args.seed = int(implicit_manifest.get("seed", ALS_SEED))
+    test_ratio = float(implicit_manifest.get("test_ratio", ALS_TEST_RATIO))
+    train, test, n_streamed = split_train_test(ratings, test_ratio, args.seed, min_rating)
     train, test = train.cache(), test.cache()
     seen = ratings.join(test.select("user_id", "book_id"), ["user_id", "book_id"], "left_anti").select(
         "user_id", "book_id").cache()

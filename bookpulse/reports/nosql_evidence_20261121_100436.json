@@ -1,0 +1,108 @@
+{
+  "active": {
+    "recs_collection": "recommendations_20261121_100211_788871",
+    "model_version": "20261121_100150_952595",
+    "switched_at": "2026-11-21 10:04:21.175000"
+  },
+  "collections": {
+    "books": 10000,
+    "meta": 1,
+    "recommendations_20261121_064345_203576": 53406,
+    "recommendations_20261121_071148_902976": 53406,
+    "recommendations_20261121_100211_788871": 53406,
+    "user_profiles_20261121_064323_987378_20261121_064345_203576": 53424,
+    "user_profiles_20261121_071127_693046_20261121_071148_902976": 53424,
+    "user_profiles_20261121_100150_952595_20261121_100211_788871": 53424
+  },
+  "users_with_recs": 53406,
+  "indexes_on_recs": [
+    "_id_"
+  ],
+  "sample_document": {
+    "_id": 1,
+    "model_version": "20261121_100150_952595",
+    "n_recs": 30,
+    "top_5": [
+      {
+        "rank": 1,
+        "book_id": 5,
+        "score": 0.7553,
+        "title": "The Great Gatsby"
+      },
+      {
+        "rank": 2,
+        "book_id": 8,
+        "score": 0.6907,
+        "title": "The Catcher in the Rye"
+      },
+      {
+        "rank": 3,
+        "book_id": 172,
+        "score": 0.6392,
+        "title": "Anna Karenina"
+      },
+      {
+        "rank": 4,
+        "book_id": 291,
+        "score": 0.6207,
+        "title": "Cutting for Stone"
+      },
+      {
+        "rank": 5,
+        "book_id": 14,
+        "score": 0.5592,
+        "title": "Animal Farm"
+      }
+    ]
+  },
+  "find_by_id_plan": {
+    "stage": "IDHACK → PROJECTION_DEFAULT",
+    "docs_examined": 1,
+    "keys_examined": 1
+  },
+  "read_latency_ms": {
+    "reads": 1000,
+    "p50": 0.63,
+    "p95": 1.02,
+    "max": 2.63
+  },
+  "recs_vs_training_ratings": {
+    "training_ratings": 5976479,
+    "rec_pairs": 1602180,
+    "fallback_pairs": 534060,
+    "rec_pairs_already_rated": 0,
+    "fallback_pairs_already_rated": 0
+  },
+  "streaming": {
+    "valid_events": 0,
+    "rejected_events": 0,
+    "last_batch": null,
+    "sum_n_ratings_in_rating_stats": 0,
+    "counts_agree": true,
+    "books_with_live_stats": 0,
+    "user_seen_pairs": 0,
+    "online_eval": {
+      "liked_events": null,
+      "hits": null,
+      "cold_start_events": null
+    }
+  },
+  "run_metadata": {
+    "commit_hash": null,
+    "working_tree_dirty": null,
+    "created_at_utc": "2026-11-21T10:04:36.334668+00:00",
+    "python_version": "3.11.18",
+    "configuration": {
+      "als_model_name": "als_implicit",
+      "als_min_rating": 4,
+      "fold_in_min_ratings": 1,
+      "fold_in_top_k": 100,
+      "fold_in_job_timeout_seconds": 120,
+      "fold_in_max_retries": 3,
+      "stream_trigger": "5 seconds",
+      "stream_watermark": "10 minutes",
+      "stream_max_offsets": 20000,
+      "kafka_log_retention_ms": 604800000
+    }
+  }
+}

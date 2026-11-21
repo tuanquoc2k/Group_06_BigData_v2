@@ -8,6 +8,7 @@ from urllib.request import urlopen
 import numpy as np
 from pymongo import MongoClient
 
+from common.cleanup import remove_test_users
 from common.events import make_producer, rating_event
 from common.foldin import load_model
 from common.recs import visible_top10
@@ -192,12 +193,7 @@ def main():
         save_report("foldin_diagnostic", report)
     finally:
         producer.close()
-        if completed_users:
-            completed_ids = sorted(completed_users)
-            user_filter = {"user_id": {"$in": completed_ids}}
-            for collection in (db.user_ratings, db.user_seen, db.recommendation_jobs):
-                collection.delete_many(user_filter)
-            db.recs_live.delete_many({"_id": {"$in": completed_ids}})
+        remove_test_users(db, completed_users)
         client.close()
 
 

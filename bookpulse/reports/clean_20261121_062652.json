@@ -1,0 +1,32 @@
+{
+  "input": "/work/data/goodbooks/ratings.csv",
+  "output": "/work/data/parquet/ratings",
+  "spark_master": "local[*]",
+  "input_rows": 5976479,
+  "rejected_invalid": 0,
+  "stream_events": null,
+  "rejected_duplicates": 0,
+  "output_rows": 5976479,
+  "output_rows_from_stream": 0,
+  "users": 53424,
+  "books": 10000,
+  "seconds": 39.2,
+  "run_metadata": {
+    "commit_hash": null,
+    "working_tree_dirty": null,
+    "created_at_utc": "2026-11-21T06:26:52.619715+00:00",
+    "python_version": "3.11.18",
+    "configuration": {
+      "als_model_name": "als_implicit",
+      "als_min_rating": 4,
+      "fold_in_min_ratings": 1,
+      "fold_in_top_k": 100,
+      "fold_in_job_timeout_seconds": 120,
+      "fold_in_max_retries": 3,
+      "stream_trigger": "5 seconds",
+      "stream_watermark": "10 minutes",
+      "stream_max_offsets": 20000,
+      "kafka_log_retention_ms": 604800000
+    }
+  }
+}

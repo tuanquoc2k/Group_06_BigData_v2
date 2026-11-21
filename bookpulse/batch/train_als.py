@@ -52,6 +52,32 @@ def ranking_metrics(recs, relevant, k):
             "distinct_books_recommended": recs.select("book_id").distinct().count()}
 
 
+def factor_consistency(model, train, alpha, reg_param, seed, users=20):
+    """Fold-in of sampled training users on the saved item factors must reproduce Spark's userFactors.
+
+    The worker recomputes user vectors from the exported item factors, so both must come from the same
+    final ALS iteration."""
+    from common.foldin import fold_in_user
+    items = model.itemFactors.orderBy("id").collect()
+    item_ids = np.asarray([row["id"] for row in items], dtype=np.int64)
+    factors = np.asarray([row["features"] for row in items], dtype=np.float64)
+    gram = factors.T @ factors
+    index = {int(book_id): i for i, book_id in enumerate(item_ids)}
+    sample = [row["user_id"] for row in train.select("user_id").distinct()
+              .orderBy(F.rand(seed + 7)).limit(users).collect()]
+    saved = {row["id"]: np.asarray(row["features"], dtype=np.float64)
+             for row in model.userFactors.filter(F.col("id").isin(sample)).collect()}
+    rows = {}
+    for row in train.filter(F.col("user_id").isin(sample)).select("user_id", "book_id", "rating").collect():
+        rows.setdefault(row["user_id"], []).append((row["book_id"], row["rating"]))
+    errors = []
+    for user_id, values in rows.items():
+        if user_id in saved:
+            vector = fold_in_user(item_ids, factors, values, alpha, reg_param, gram, 1, index)
+            errors.append(float(np.max(np.abs(vector - saved[user_id]))))
+    return {"users_checked": len(errors), "max_absolute_error": max(errors) if errors else None}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ranks", default=ALS_RANKS)
@@ -84,6 +110,11 @@ def main():
     ratings = spark.read.parquet(str(PARQUET_DIR / "ratings"))
     # Split only positive ratings; low ratings remain in `ratings` for seen-book filtering at serve time.
     train, test, n_streamed = split_train_test(ratings, args.test_ratio, args.seed, args.min_rating)
+    if not args.implicit:
+        # Explicit ALS predicts stars, so it learns from every rating (low ones included); only the
+        # held-out positive test pairs stay out, which keeps the test set identical to the implicit model's.
+        train = (ratings.select("user_id", "book_id", "rating")
+                 .join(test.select("user_id", "book_id"), ["user_id", "book_id"], "left_anti"))
     train, test = train.cache(), test.cache()
     evaluator = RegressionEvaluator(metricName="rmse", labelCol="rating", predictionCol="prediction")
 
@@ -133,11 +164,23 @@ def main():
                               "seconds": round(time.time() - started_combo, 1)})
                 print(tried[-1], flush=True)
             best = max(tried, key=lambda t: t["validation_precision@10"])
+            # Free the grid's cached data before the final fit: under memory pressure Spark recomputed part of
+            # the final factors and saved item factors that no longer matched the user factors.
+            for frame in (fit_part, val, val_users):
+                frame.unpersist(blocking=True)
         else:
             rank, reg, alpha = combos[0]
             best = {"rank": rank, "regParam": reg, "alpha": alpha}
             tried.append(best)
         model = implicit_als(best["rank"], best["regParam"], best["alpha"]).fit(train)
+        consistency = factor_consistency(model, train, best["alpha"], best["regParam"], args.seed)
+        if consistency["max_absolute_error"] > 1e-4:
+            print(f"item/user factors inconsistent ({consistency}); refitting once", flush=True)
+            model = implicit_als(best["rank"], best["regParam"], best["alpha"]).fit(train)
+            consistency = factor_consistency(model, train, best["alpha"], best["regParam"], args.seed)
+            consistency["refitted"] = True
+        if consistency["max_absolute_error"] > 1e-4:
+            raise RuntimeError(f"ALS item/user factors are inconsistent after refit: {consistency}")
     else:
         grid = ParamGridBuilder().addGrid(als.rank, ranks).addGrid(als.regParam, regs).build()
         tvs = TrainValidationSplit(estimator=als, estimatorParamMaps=grid, evaluator=evaluator,
@@ -182,6 +225,9 @@ def main():
         "regParam": best["regParam"],
         "rank": best["rank"],
         "maxIter": args.max_iter,
+        "foldin_factor_consistency": consistency if args.implicit else None,
+        "seed": args.seed,
+        "test_ratio": args.test_ratio,
         "trained_at": datetime.now(timezone.utc).isoformat(),
     }
     if args.implicit:
@@ -205,6 +251,7 @@ def main():
         "model_version": model_version,
         "rows": {"train": train.count(), "test": test.count(), "streamed_in_train": n_streamed},
         "grid": tried,
+        "foldin_factor_consistency": consistency if args.implicit else None,
         "best_params": best,
         "rmse_test": rmse,
         "ranking_test": ranking,

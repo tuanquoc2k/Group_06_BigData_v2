@@ -1,0 +1,147 @@
+{
+  "model_version": "20261121_071127_693046",
+  "simulated_events": true,
+  "seed_book_ids": [
+    110,
+    3,
+    483,
+    836,
+    2254
+  ],
+  "cases": [
+    {
+      "case": "in_top10",
+      "user_id": -1100000000,
+      "seed_event_ids": [
+        "e03034347d08470fb64f34c72a93111c",
+        "a52781fac7a94ff1ba7a6d94c445f263",
+        "1f671976b197491297a31e58bbe0fba3",
+        "ac4fbbb671ee4bd8a385ab988da83883",
+        "d20d5146c97543c08d937fc9ebb9fff2"
+      ],
+      "trigger_event_id": "450d8de47ae2403ea3fa98854469c262",
+      "target_book_id": 39,
+      "was_in_pre_rating_top10": true,
+      "rating_rows_after_trigger": 6,
+      "job_status": "done",
+      "live_source": "als-foldin",
+      "model_version": "20261121_071127_693046",
+      "positive_ratings": 6,
+      "unknown_positive_ratings": 0,
+      "vector_delta_norm": 0.145395783949225,
+      "vector_cosine_previous": 0.9396928860260962,
+      "worker_seconds": {
+        "fold_in": 0.008216732999244414,
+        "ranking": 0.005448084999443381,
+        "mongo_snapshot_write": 0.003493512000204646
+      },
+      "send_to_live_seconds": 4.017570440999407,
+      "top10_change": {
+        "before": [
+          39,
+          135,
+          188,
+          165,
+          17,
+          20,
+          1,
+          16,
+          98,
+          140
+        ],
+        "after": [
+          135,
+          188,
+          165,
+          1,
+          17,
+          20,
+          16,
+          12,
+          19,
+          98
+        ],
+        "jaccard": 0.6666666666666666,
+        "mean_absolute_rank_shift": 1.0
+      },
+      "app_top10_excludes_rated_book": true
+    },
+    {
+      "case": "outside_top10",
+      "user_id": -1100000001,
+      "seed_event_ids": [
+        "63653ecc4f2641f585527be1e57e3f08",
+        "49b1dab0096e443c803c5b66f3a4a8c4",
+        "74c69b81131c484abd84f0964fbc9552",
+        "0a4a8643d9354802b06537281672b85b",
+        "66ca7327b2bf42abb3ec12e93b7ac6ae"
+      ],
+      "trigger_event_id": "fddf0d0a03f14a5191c380b52c1eddf8",
+      "target_book_id": 248,
+      "was_in_pre_rating_top10": false,
+      "rating_rows_after_trigger": 6,
+      "job_status": "done",
+      "live_source": "als-foldin",
+      "model_version": "20261121_071127_693046",
+      "positive_ratings": 6,
+      "unknown_positive_ratings": 0,
+      "vector_delta_norm": 0.16585672400934934,
+      "vector_cosine_previous": 0.7702988525985925,
+      "worker_seconds": {
+        "fold_in": 0.0033754260002751835,
+        "ranking": 0.004636136000044644,
+        "mongo_snapshot_write": 0.003159024999149551
+      },
+      "send_to_live_seconds": 5.087328183000864,
+      "top10_change": {
+        "before": [
+          39,
+          135,
+          188,
+          165,
+          17,
+          20,
+          1,
+          16,
+          98,
+          140
+        ],
+        "after": [
+          135,
+          39,
+          188,
+          165,
+          17,
+          20,
+          29,
+          125,
+          154,
+          1
+        ],
+        "jaccard": 0.5384615384615384,
+        "mean_absolute_rank_shift": 0.7142857142857143
+      },
+      "app_top10_excludes_rated_book": true
+    }
+  ],
+  "cleanup": "test user ratings/jobs/seen/live rows removed; Kafka and archive events retained",
+  "created_at": "2026-11-21T07:35:53.028893+00:00",
+  "run_metadata": {
+    "commit_hash": null,
+    "working_tree_dirty": null,
+    "created_at_utc": "2026-11-21T07:35:53.029344+00:00",
+    "python_version": "3.11.18",
+    "configuration": {
+      "als_model_name": "als_implicit",
+      "als_min_rating": 4,
+      "fold_in_min_ratings": 1,
+      "fold_in_top_k": 100,
+      "fold_in_job_timeout_seconds": 120,
+      "fold_in_max_retries": 3,
+      "stream_trigger": "5 seconds",
+      "stream_watermark": "10 minutes",
+      "stream_max_offsets": 20000,
+      "kafka_log_retention_ms": 604800000
+    }
+  }
+}

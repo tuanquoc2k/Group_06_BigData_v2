@@ -5,6 +5,8 @@
 App BookPulse dùng **ALS implicit** (artifact có version tại `models/als_implicit/versions/<model_version>`, rank/regParam/alpha trong manifest) thay cho **ALS explicit** dùng trước đây.
 
 > **Cập nhật quan trọng:** Các số liệu 0,204 / 0,008 / 0,078 và các ví dụ bên dưới là kết quả lịch sử của quy trình cũ. Sau thay đổi, chỉ rating >= 4 là tín hiệu tích cực mặc định; test giữ lại ngẫu nhiên theo từng user; sách rating thấp vẫn bị loại khỏi gợi ý. Không dùng các số lịch sử làm kết quả của cấu hình mới. Chạy `scripts/run_pipeline.sh` và đọc `reports/train_als_*.json`, `reports/train_als_implicit_*.json`, `reports/foldin_eval_*.json` để có số đo mới.
+>
+> **Kết quả cấu hình mới (21/11/2026, mô hình `20261121_100150_952595`, 5.000 user test):** ALS implicit rank 50, alpha 1 (chọn trên validation, P@10 0,1675) đạt Precision@10 **0,248**, Recall@10 0,168, NDCG@10 **0,293**, 1.472 đầu sách; sách phổ biến 0,074 / 0,050 / 0,091; ALS explicit (học trên mọi rating, RMSE 0,754 so với 0,799 của trung bình theo sách) chỉ 0,018 / 0,016 / 0,019. Lấy cả rating 3 sao làm tín hiệu thích cho P@10 0,215, nên giữ ngưỡng 4. Nguồn: `reports/train_als_implicit_20261121_071137.json`, `evidence/session9/E_model_validation.json`, `G1_implicit_semantics.json`.
 
 Trong benchmark lịch sử, trên cùng tập test và cùng 4.993 người dùng, Precision@10 tăng từ 0,008 lên 0,204. Đây không phải kết quả của pipeline mới; mô hình vẫn được chọn theo Precision@10 thay vì RMSE vì người dùng chỉ thấy danh sách 10 cuốn.
 

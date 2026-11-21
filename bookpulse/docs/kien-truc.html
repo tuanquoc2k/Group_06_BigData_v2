@@ -112,7 +112,7 @@ table.ev td:first-child { font-weight: 600; white-space: nowrap; }
     <h1>Kiến trúc BookPulse</h1>
     <p class="lead">Hệ thống gợi ý sách BDA501 theo đúng code trong <code>bookpulse/</code>, tổ chức theo ý tưởng Lambda: batch huấn luyện item factors và tạo user profiles, streaming cập nhật rating, recommendation worker fold-in user vector; app đọc <code>recs_live</code> trước rồi batch view và vẫn ẩn sách trong <code>user_seen</code>. Một máy, Docker: compose <code>bookpulse</code> (spark, kafka, mongo, app, recommendation-worker) và compose <code>bookpulse-hadoop</code> cho nhánh kiểm chứng MapReduce; hai bên chỉ nối qua thư mục chung <code>bookpulse/</code>. Item factors cố định tới batch train tiếp theo; mặc định một rating tích cực hợp lệ là đủ để thử fold-in; sách mới chờ batch.</p>
   </header>
-  <p class="lead">Sơ đồ tổng quan hiện tại: <a href="img/architecture_overview.svg">img/architecture_overview.svg</a>; sơ đồ dưới đây thể hiện luồng fold-in đang chạy.</p>
+  <p class="lead">Sơ đồ tổng quan hiện tại: <a href="img/architecture_overview.png">img/architecture_overview.png</a>; sơ đồ dưới đây thể hiện luồng fold-in đang chạy.</p>
 
   <figure>
     <div class="scroll">
@@ -223,15 +223,18 @@ table.ev td:first-child { font-weight: 600; white-space: nowrap; }
 <text class="sub2" x="326" y="508">• valid: watermark + bỏ trùng → user_seen, user_ratings, recommendation_jobs</text>
 <text class="sub2" x="326" y="533">• rating_stats: dựng từ rating mới nhất theo cặp user–sách</text>
 <text class="sub2" x="326" y="558">• rejected: đếm lỗi · archive: lưu sự kiện hợp lệ cho batch</text>
-<text class="sub2" x="326" y="583">• worker riêng: fold-in user trên item factors cố định → recs_live</text>
+<text class="sub2" x="326" y="583">• recommendation_jobs → worker fold-in (container riêng) → recs_live</text>
 <text class="sub2" x="326" y="607">• ≤ 20.000 offset/batch · foreachBatch ghi MongoDB tại driver</text>
-<path class="box " d="M925,491 a87.5,9 0 0 0 175,0 V593 a87.5,9 0 0 1 -175,0 Z"/>
-<ellipse class="box " cx="1012.5" cy="491" rx="87.5" ry="9"/>
-<text class="t" x="1012.5" y="522.5" text-anchor="middle">checkpoints/</text>
-<text class="sub" x="1012.5" y="543.5" text-anchor="middle">offset + state</text>
-<text class="sub" x="1012.5" y="564.5" text-anchor="middle">1 thư mục / query</text>
-<text class="sub" x="1012.5" y="585.5" text-anchor="middle">volume spark-checkpoints</text>
-<path class="a r" d="M895,542 H923" marker-start="url(#ahr)" marker-end="url(#ahr)"/>
+<path class="box " d="M925,484 a87.5,9 0 0 0 175,0 V528 a87.5,9 0 0 1 -175,0 Z"/>
+<ellipse class="box " cx="1012.5" cy="484" rx="87.5" ry="9"/>
+<text class="t" x="1012.5" y="511" text-anchor="middle">checkpoints/</text>
+<text class="sub" x="1012.5" y="529" text-anchor="middle">offset + state · 1 / query</text>
+<path class="a r" d="M895,510 H923" marker-start="url(#ahr)" marker-end="url(#ahr)"/>
+<rect class="box m" x="925" y="548" width="175" height="64" rx="7"/>
+<text class="t" x="1012.5" y="574" text-anchor="middle">worker fold-in</text>
+<text class="sub" x="1012.5" y="596" text-anchor="middle">tính lại gu user</text>
+<path class="a m" d="M1175,500 H1140 V570 H1102" marker-end="url(#ahm)"/>
+<path class="a m" d="M1100,596 H1158 V529 H1173" marker-end="url(#ahm)"/>
 <path class="a s" d="M367.5,452 V396" marker-end="url(#ahs)"/>
 <rect class="badge s" x="384.5" y="407" width="30" height="21" rx="10"/>
 <text class="badge-t" x="399.5" y="423" text-anchor="middle">S4</text>
@@ -266,7 +269,7 @@ table.ev td:first-child { font-weight: 600; white-space: nowrap; }
 <rect class="box" x="1175" y="488" width="190" height="24" rx="4"/>
 <text class="m" x="1185" y="505">recommendation_jobs</text>
 <rect class="box" x="1175" y="517" width="190" height="24" rx="4"/>
-<text class="m" x="1185" y="534">recs_live (als-foldin)</text>
+<text class="m" x="1185" y="534">recs_live</text>
 <rect class="box" x="1175" y="546" width="190" height="24" rx="4"/>
 <text class="m" x="1185" y="563">stream_state</text>
 <rect class="box" x="1175" y="575" width="190" height="24" rx="4"/>
@@ -403,7 +406,7 @@ table.ev td:first-child { font-weight: 600; white-space: nowrap; }
       <tr><td>Spark SQL</td><td><code>batch/analytics_sql.py</code></td><td>Temp view, 6 câu hỏi; SQL = DataFrame API; BroadcastHashJoin: một <code>Exchange</code> shuffle + một <code>BroadcastExchange</code> (bảng sách nhỏ); Parquet nhanh hơn CSV 3,9–8,4 lần (dao động theo bộ nhớ đệm; lần chạy cuối 4,22 s so với 1,08 s = 3,9 lần)</td><td><code>reports/analytics_sql_*.json</code>, <code>sql_plan_*.txt</code></td></tr>
       <tr><td>Spark ML</td><td><code>batch/train_als.py</code></td><td>Chỉ rating >= ngưỡng (mặc định 4) là tín hiệu thích; test giữ lại theo user. Item factors và manifest có phiên bản. Số 0,204 trong report cũ là lịch sử, không đại diện cho cấu hình hiện tại.</td><td><code>reports/train_als*.json</code>, <code>reports/foldin_eval_*.json</code></td></tr>
       <tr><td>NoSQL (MongoDB)</td><td><code>batch/write_recs.py</code>, <code>streaming/stream_stats.py</code></td><td>Recommendation và versioned <code>user_profiles</code> được kiểm tra đủ trước khi chuyển <code>meta.active</code>; <code>user_ratings</code> unique theo user/sách; một job pending/user; <code>recs_live</code> thay bản batch cho user đủ rating. Khi đổi model, live recs cũ được đánh dấu stale, không bị xóa.</td><td><code>reports/nosql_evidence_*.json</code>, <code>write_recs_*.json</code></td></tr>
-      <tr><td>Recommendation worker</td><td><code>streaming/recommendation_worker.py</code></td><td>Job atomic claim có token, debounce, retry/timeout; fold-in kết hợp lịch sử batch với stream overlay, dùng alpha/regParam của model active; nếu model đổi trong lúc xử lý thì job được xếp lại.</td><td>✓ pytest: 54 passed; trace: <code>reports/foldin_diagnostic_20261116_091506.json</code>; offline: <code>reports/foldin_eval_20261116_092620.json</code></td></tr>
+      <tr><td>Recommendation worker</td><td><code>streaming/recommendation_worker.py</code></td><td>Job atomic claim có token, debounce, retry/timeout; fold-in kết hợp lịch sử batch với stream overlay, dùng alpha/regParam của model active; nếu model đổi trong lúc xử lý thì job được xếp lại.</td><td>✓ pytest: 55 passed; trace: <code>reports/foldin_diagnostic_20261121_073553.json</code>; offline: <code>reports/foldin_eval_20261121_072720.json</code></td></tr>
       <tr><td>Streaming</td><td><code>streaming/</code></td><td>3 Structured Streaming query xử lý watermark, archive và dữ liệu hợp lệ; worker fold-in nhận job, rating thấp chỉ ẩn sách. <code>event_time</code> do producer gán, <code>ingested_at</code> do Spark ghi. Các số đo hiện tại được phân loại trong báo cáo bằng chứng.</td><td><code>reports/stream_progress_*.json</code>, <a href="streaming.md">streaming.md</a></td></tr>
       <tr><td>Thể loại sách</td><td><code>scripts/update_book_genres.py</code></td><td>Chuẩn hóa tags GoodReads, có thể bổ sung Google Books theo lệnh; xuất CSV và upsert genres vào <code>books</code>. Không chạy API khi mở app.</td><td><code>reports/book_genres_*.json</code></td></tr>
       <tr><td>App</td><td><code>app/app.py</code>, <code>app/bookstore.py</code>, <code>app/setting.py</code></td><td>Trang đọc chọn user, chuyển giữa Gợi ý, Khám phá, Sách đã xem và có bộ sao không số dưới mỗi thẻ sách. Rating gửi vào Kafka; modal khóa thao tác khi đang chờ ingest và worker fold-in. Trang Điều khiển demo quản lý streaming, phát sự kiện mô phỏng và kiểm chứng.</td><td><a href="streaming.md">streaming.md</a></td></tr>

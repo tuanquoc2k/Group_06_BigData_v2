@@ -1,0 +1,37 @@
+{
+  "model_version": "20261121_071127_693046",
+  "serving_version": "20261121_071148_902976",
+  "model": "als_implicit",
+  "min_rating": 4,
+  "collection": "recommendations_20261121_071148_902976",
+  "users_written": 53406,
+  "profile_collection": "user_profiles_20261121_071127_693046_20261121_071148_902976",
+  "profile_users_expected": 53424,
+  "profile_users_written": 53424,
+  "top_n": 30,
+  "fallback_n": 10,
+  "users_with_full_fallback": 53406,
+  "books_loaded": 10000,
+  "expected_users": 53406,
+  "previous_collection": "recommendations_20261121_064345_203576",
+  "old_versions_retained": true,
+  "seconds": 136.5,
+  "run_metadata": {
+    "commit_hash": null,
+    "working_tree_dirty": null,
+    "created_at_utc": "2026-11-21T07:14:05.404116+00:00",
+    "python_version": "3.11.18",
+    "configuration": {
+      "als_model_name": "als_implicit",
+      "als_min_rating": 4,
+      "fold_in_min_ratings": 1,
+      "fold_in_top_k": 100,
+      "fold_in_job_timeout_seconds": 120,
+      "fold_in_max_retries": 3,
+      "stream_trigger": "5 seconds",
+      "stream_watermark": "10 minutes",
+      "stream_max_offsets": 20000,
+      "kafka_log_retention_ms": 604800000
+    }
+  }
+}

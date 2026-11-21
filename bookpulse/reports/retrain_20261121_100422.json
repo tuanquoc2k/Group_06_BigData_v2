@@ -1,0 +1,212 @@
+{
+  "started": "2026-11-21T09:57:53.426645+00:00",
+  "total_seconds": 389.5,
+  "step_seconds": {
+    "clean": 53.4,
+    "train_als_implicit": 195.9,
+    "write_recs": 140.0
+  },
+  "stream_job": {
+    "was_running": false,
+    "stop": "was not running",
+    "restart": "left stopped"
+  },
+  "archive_before_clean": {
+    "rows": 0,
+    "distinct_events": 0
+  },
+  "clean": {
+    "output_rows": 5976479,
+    "output_rows_from_stream": 0,
+    "stream_events": null
+  },
+  "train": {
+    "rows": {
+      "train": 3319021,
+      "test": 803090,
+      "streamed_in_train": 0
+    },
+    "best_params": {
+      "rank": 50,
+      "regParam": 0.1,
+      "alpha": 1.0
+    },
+    "ranking_test": {
+      "als": {
+        "precision@10": 0.248,
+        "recall@10": 0.1684,
+        "users_evaluated": 5000,
+        "distinct_books_recommended": 1472
+      },
+      "baseline_popular": {
+        "precision@10": 0.0743,
+        "recall@10": 0.0502,
+        "users_evaluated": 5000,
+        "distinct_books_recommended": 39
+      }
+    },
+    "fit_seconds": 90.3
+  },
+  "write_recs": {
+    "model_version": "20261121_100150_952595",
+    "collection": "recommendations_20261121_100211_788871",
+    "users_written": 53406,
+    "previous_collection": "recommendations_20261121_071148_902976"
+  },
+  "user": 1,
+  "before": {
+    "model_version": "20261121_071127_693046",
+    "recs_collection": "recommendations_20261121_071148_902976",
+    "source": "batch",
+    "top10": [
+      {
+        "rank": 1,
+        "book_id": 5,
+        "score": 0.7553,
+        "title": "The Great Gatsby"
+      },
+      {
+        "rank": 2,
+        "book_id": 8,
+        "score": 0.6907,
+        "title": "The Catcher in the Rye"
+      },
+      {
+        "rank": 3,
+        "book_id": 172,
+        "score": 0.6392,
+        "title": "Anna Karenina"
+      },
+      {
+        "rank": 4,
+        "book_id": 291,
+        "score": 0.6207,
+        "title": "Cutting for Stone"
+      },
+      {
+        "rank": 5,
+        "book_id": 14,
+        "score": 0.5592,
+        "title": "Animal Farm"
+      },
+      {
+        "rank": 6,
+        "book_id": 15,
+        "score": 0.5465,
+        "title": "The Diary of a Young Girl"
+      },
+      {
+        "rank": 7,
+        "book_id": 63,
+        "score": 0.5282,
+        "title": "Wuthering Heights"
+      },
+      {
+        "rank": 8,
+        "book_id": 83,
+        "score": 0.5257,
+        "title": "A Tale of Two Cities"
+      },
+      {
+        "rank": 9,
+        "book_id": 118,
+        "score": 0.5172,
+        "title": "The Joy Luck Club"
+      },
+      {
+        "rank": 10,
+        "book_id": 146,
+        "score": 0.5169,
+        "title": "The Goldfinch"
+      }
+    ]
+  },
+  "after": {
+    "model_version": "20261121_100150_952595",
+    "recs_collection": "recommendations_20261121_100211_788871",
+    "source": "batch",
+    "top10": [
+      {
+        "rank": 1,
+        "book_id": 5,
+        "score": 0.7553,
+        "title": "The Great Gatsby"
+      },
+      {
+        "rank": 2,
+        "book_id": 8,
+        "score": 0.6907,
+        "title": "The Catcher in the Rye"
+      },
+      {
+        "rank": 3,
+        "book_id": 172,
+        "score": 0.6392,
+        "title": "Anna Karenina"
+      },
+      {
+        "rank": 4,
+        "book_id": 291,
+        "score": 0.6207,
+        "title": "Cutting for Stone"
+      },
+      {
+        "rank": 5,
+        "book_id": 14,
+        "score": 0.5592,
+        "title": "Animal Farm"
+      },
+      {
+        "rank": 6,
+        "book_id": 15,
+        "score": 0.5465,
+        "title": "The Diary of a Young Girl"
+      },
+      {
+        "rank": 7,
+        "book_id": 63,
+        "score": 0.5282,
+        "title": "Wuthering Heights"
+      },
+      {
+        "rank": 8,
+        "book_id": 83,
+        "score": 0.5257,
+        "title": "A Tale of Two Cities"
+      },
+      {
+        "rank": 9,
+        "book_id": 118,
+        "score": 0.5172,
+        "title": "The Joy Luck Club"
+      },
+      {
+        "rank": 10,
+        "book_id": 146,
+        "score": 0.5169,
+        "title": "The Goldfinch"
+      }
+    ]
+  },
+  "top10_books_changed": 0,
+  "exclude_simulated": false,
+  "failed_step": null,
+  "run_metadata": {
+    "commit_hash": null,
+    "working_tree_dirty": null,
+    "created_at_utc": "2026-11-21T10:04:22.933660+00:00",
+    "python_version": "3.11.18",
+    "configuration": {
+      "als_model_name": "als_implicit",
+      "als_min_rating": 4,
+      "fold_in_min_ratings": 1,
+      "fold_in_top_k": 100,
+      "fold_in_job_timeout_seconds": 120,
+      "fold_in_max_retries": 3,
+      "stream_trigger": "5 seconds",
+      "stream_watermark": "10 minutes",
+      "stream_max_offsets": 20000,
+      "kafka_log_retention_ms": 604800000
+    }
+  }
+}

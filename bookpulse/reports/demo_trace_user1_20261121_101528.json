@@ -1,0 +1,163 @@
+{
+  "rated": "user 1 rated book 5 (The Great Gatsby) 5 stars\nsent 1 event(s) to 'rating-events'. After the next trigger the app hides them and moves the next recommendations up.",
+  "before": {
+    "model_version": "20261121_100150_952595",
+    "recs_collection": "recommendations_20261121_100211_788871",
+    "source": "batch",
+    "top10": [
+      {
+        "rank": 1,
+        "book_id": 5,
+        "score": 0.7553,
+        "title": "The Great Gatsby"
+      },
+      {
+        "rank": 2,
+        "book_id": 8,
+        "score": 0.6907,
+        "title": "The Catcher in the Rye"
+      },
+      {
+        "rank": 3,
+        "book_id": 172,
+        "score": 0.6392,
+        "title": "Anna Karenina"
+      },
+      {
+        "rank": 4,
+        "book_id": 291,
+        "score": 0.6207,
+        "title": "Cutting for Stone"
+      },
+      {
+        "rank": 5,
+        "book_id": 14,
+        "score": 0.5592,
+        "title": "Animal Farm"
+      },
+      {
+        "rank": 6,
+        "book_id": 15,
+        "score": 0.5465,
+        "title": "The Diary of a Young Girl"
+      },
+      {
+        "rank": 7,
+        "book_id": 63,
+        "score": 0.5282,
+        "title": "Wuthering Heights"
+      },
+      {
+        "rank": 8,
+        "book_id": 83,
+        "score": 0.5257,
+        "title": "A Tale of Two Cities"
+      },
+      {
+        "rank": 9,
+        "book_id": 118,
+        "score": 0.5172,
+        "title": "The Joy Luck Club"
+      },
+      {
+        "rank": 10,
+        "book_id": 146,
+        "score": 0.5169,
+        "title": "The Goldfinch"
+      }
+    ]
+  },
+  "after": {
+    "model_version": "20261121_100150_952595",
+    "recs_collection": "recommendations_20261121_100211_788871",
+    "source": "als-foldin",
+    "top10": [
+      {
+        "rank": 1,
+        "book_id": 172,
+        "score": 0.7573091916557039,
+        "title": "Anna Karenina"
+      },
+      {
+        "rank": 2,
+        "book_id": 8,
+        "score": 0.7432417703351551,
+        "title": "The Catcher in the Rye"
+      },
+      {
+        "rank": 3,
+        "book_id": 291,
+        "score": 0.7269851197804115,
+        "title": "Cutting for Stone"
+      },
+      {
+        "rank": 4,
+        "book_id": 130,
+        "score": 0.6229381326635406,
+        "title": "The Old Man and the Sea"
+      },
+      {
+        "rank": 5,
+        "book_id": 14,
+        "score": 0.6178500678603461,
+        "title": "Animal Farm"
+      },
+      {
+        "rank": 6,
+        "book_id": 83,
+        "score": 0.6143017128599034,
+        "title": "A Tale of Two Cities"
+      },
+      {
+        "rank": 7,
+        "book_id": 195,
+        "score": 0.6078611457199731,
+        "title": "The Guernsey Literary and Potato Peel Pie Society"
+      },
+      {
+        "rank": 8,
+        "book_id": 63,
+        "score": 0.5939537640368925,
+        "title": "Wuthering Heights"
+      },
+      {
+        "rank": 9,
+        "book_id": 146,
+        "score": 0.5901475630551049,
+        "title": "The Goldfinch"
+      },
+      {
+        "rank": 10,
+        "book_id": 15,
+        "score": 0.5826332312414791,
+        "title": "The Diary of a Young Girl"
+      }
+    ]
+  },
+  "elapsed_seconds": 9.1,
+  "recs_live": {
+    "_id": 1,
+    "source": "als-foldin",
+    "model_version": "20261121_100150_952595",
+    "event_to_recommend_seconds": 8.293,
+    "ingestion_to_recommend_seconds": 1.08
+  },
+  "run_metadata": {
+    "commit_hash": null,
+    "working_tree_dirty": null,
+    "created_at_utc": "2026-11-21T10:15:28.468792+00:00",
+    "python_version": "3.11.18",
+    "configuration": {
+      "als_model_name": "als_implicit",
+      "als_min_rating": 4,
+      "fold_in_min_ratings": 1,
+      "fold_in_top_k": 100,
+      "fold_in_job_timeout_seconds": 120,
+      "fold_in_max_retries": 3,
+      "stream_trigger": "5 seconds",
+      "stream_watermark": "10 minutes",
+      "stream_max_offsets": 20000,
+      "kafka_log_retention_ms": 604800000
+    }
+  }
+}

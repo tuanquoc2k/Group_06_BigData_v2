@@ -8,6 +8,7 @@ from urllib.request import urlopen
 import numpy as np
 from pymongo import MongoClient
 
+from common.cleanup import remove_test_users
 from common.events import make_producer, rating_event
 from common.foldin import load_model
 from common.settings import (
@@ -160,11 +161,7 @@ def main():
     finally:
         producer.close()
         user_filter = {"user_id": {"$in": test_users}}
-        if completed_users:
-            completed_filter = {"user_id": {"$in": sorted(completed_users)}}
-            for collection in (db.user_ratings, db.user_seen, db.recommendation_jobs):
-                collection.delete_many(completed_filter)
-            db.recs_live.delete_many({"_id": {"$in": sorted(completed_users)}})
+        remove_test_users(db, completed_users)
         client.close()
 
 

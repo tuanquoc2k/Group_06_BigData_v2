@@ -4,6 +4,7 @@ Run after batch/train_als.py --implicit. This is a retrospective offline simulat
 changes without claiming real-user or production latency.
 """
 import argparse
+import random
 import time
 
 import numpy as np
@@ -14,7 +15,8 @@ from pyspark.sql import functions as F
 from common.foldin import fold_in, load_model, recommend
 from common.recs import explode_recs, split_train_test, top_k_unseen
 from common.settings import (
-    FOLD_IN_MIN_RATINGS, FOLD_IN_TOP_K, PARQUET_DIR, current_model, get_spark, save_report,
+    ALS_SEED, ALS_TEST_RATIO, FOLD_IN_MIN_RATINGS, FOLD_IN_TOP_K, PARQUET_DIR, current_model, get_spark,
+    save_report,
 )
 
 
@@ -33,7 +35,8 @@ def metrics(recommendations, relevant, k):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--eval-users", type=int, default=1000)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=None,
+                        help="split seed; defaults to the seed saved in the model manifest (ALS_SEED)")
     parser.add_argument("--candidates", type=int, default=200)
     parser.add_argument("--top-n", type=int, default=10)
     parser.add_argument("--vector-check-users", type=int, default=20)
@@ -44,12 +47,21 @@ def main():
     if not manifest.get("implicitPrefs", manifest.get("implicit")):
         raise RuntimeError("The active ALS artifact is not an implicit-feedback model")
     fold_model = load_model(model_path)
+    # Rebuild exactly the train/test split the model was trained on, otherwise held-out targets could
+    # have been seen in training.
+    if args.seed is None:
+        args.seed = int(manifest.get("seed", ALS_SEED))
+    test_ratio = float(manifest.get("test_ratio", ALS_TEST_RATIO))
 
     spark = get_spark("bookpulse-foldin-eval")
     model = ALSModel.load(str(model_path / "spark_model"))
     started = time.time()
     ratings = spark.read.parquet(str(PARQUET_DIR / "ratings"))
-    train, test, _ = split_train_test(ratings, 0.2, args.seed, int(manifest["min_rating"]))
+    train, test, _ = split_train_test(ratings, test_ratio, args.seed, int(manifest["min_rating"]))
+    # Materialise the split once. The split orders rows by rand() inside a per-user window, so a later
+    # filter on user_id pushed below the window would re-draw rand() and give a different split.
+    train, test = train.cache(), test.cache()
+    train.count(), test.count()
 
     test_window = Window.partitionBy("user_id")
     order_window = Window.partitionBy("user_id").orderBy(F.rand(args.seed + 1), F.asc("book_id"))
@@ -69,8 +81,10 @@ def main():
     target = target.join(eval_users, "user_id").cache()
     base_seen = (ratings.join(test.select("user_id", "book_id"), ["user_id", "book_id"], "left_anti")
                  .join(eval_users, "user_id"))
+    # "Before" = batch list with the replayed books hidden (what the app shows without fold-in).
+    hidden_after_replay = base_seen.select("user_id", "book_id").unionByName(replay.select("user_id", "book_id"))
     before_raw = model.recommendForUserSubset(eval_users, args.candidates)
-    before_rows = top_k_unseen(explode_recs(before_raw), base_seen, args.top_n).collect()
+    before_rows = top_k_unseen(explode_recs(before_raw), hidden_after_replay, args.top_n).collect()
     before = {}
     for row in before_rows:
         before.setdefault(row["user_id"], []).append(row["book_id"])
@@ -83,6 +97,10 @@ def main():
     replay_by_user = {row["user_id"]: [(r["book_id"], r["rating"]) for r in row["ratings"]]
                       for row in replay.groupBy("user_id").agg(
                           F.collect_list(F.struct("book_id", "rating")).alias("ratings")).collect()}
+    # Training positives of each user: the worker folds in history + new ratings, never new ratings alone.
+    history_by_user = {row["user_id"]: [(r["book_id"], r["rating"]) for r in row["ratings"]]
+                       for row in train.join(eval_users, "user_id").groupBy("user_id").agg(
+                           F.collect_list(F.struct("book_id", "rating")).alias("ratings")).collect()}
     batch_candidates = {}
     for row in explode_recs(before_raw).collect():
         batch_candidates.setdefault(int(row["user_id"]), []).append(
@@ -97,7 +115,8 @@ def main():
         started_user = time.perf_counter()
         after[user_id] = [
             book_id for book_id, _ in recommend(
-                values, seen_by_user.get(user_id, set()), fold_model, args.top_n
+                history_by_user.get(user_id, []) + values, seen_by_user.get(user_id, set()),
+                fold_model, args.top_n
             )
         ]
         recommendation_seconds.append(time.perf_counter() - started_user)
@@ -140,7 +159,8 @@ def main():
             "max_absolute_error": float(np.max(np.abs(solved - saved))),
         })
 
-    # Mô phỏng hồ sơ có đúng N rating dương; rating thấp chỉ được dùng để ẩn sách.
+    # Mô phỏng user có lịch sử train rồi chấm thêm đúng N rating dương mới (chọn ngẫu nhiên có seed);
+    # rating thấp chỉ được dùng để ẩn sách.
     rating_count_groups = []
     train_positive_counts = {
         int(row["user_id"]): int(row["n"])
@@ -157,6 +177,7 @@ def main():
                  if float(rating) >= int(manifest["min_rating"])),
                 key=lambda pair: pair[0],
             )
+            random.Random(args.seed * 1_000_003 + int(user_id)).shuffle(positives)
             if len(positives) < rating_count:
                 continue
             selected_positive = positives[:rating_count]
@@ -172,7 +193,8 @@ def main():
             ][:args.top_n]
             group_after[user_id] = [
                 book_id for book_id, _ in recommend(
-                    selected_positive + low_rated, current_seen, fold_model, args.top_n
+                    history_by_user.get(user_id, []) + selected_positive + low_rated, current_seen,
+                    fold_model, args.top_n
                 )
             ]
             left, right = set(group_before[user_id]), set(group_after[user_id])
@@ -240,13 +262,16 @@ def main():
     benchmark_started = time.perf_counter()
     for user_id, values in benchmark_pairs:
         started_user = time.perf_counter()
-        recommend(values, seen_by_user.get(user_id, set()), fold_model, FOLD_IN_TOP_K)
+        recommend(history_by_user.get(user_id, []) + values, seen_by_user.get(user_id, set()), fold_model,
+                  FOLD_IN_TOP_K)
         benchmark_seconds.append(time.perf_counter() - started_user)
     benchmark_total = time.perf_counter() - benchmark_started
 
     save_report("foldin_eval", {
         "model_version": manifest["model_version"],
         "min_rating": manifest["min_rating"],
+        "split": {"test_ratio": test_ratio, "seed": args.seed},
+        "comparison": "before = batch list with replayed books hidden; after = fold-in of train history + replay",
         "replay_ratings": replay.count(),
         "target_ratings": target.count(),
         "users_evaluated": len(relevant),

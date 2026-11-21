@@ -1,0 +1,62 @@
+{
+  "topic": "rating-events",
+  "configured_retention_ms": 604800000,
+  "messages": 3078,
+  "messages_per_partition": {
+    "0": 1019,
+    "1": 1016,
+    "2": 1043
+  },
+  "distinct_event_ids": 3019,
+  "repeated_messages": 59,
+  "distinct_valid_events": 3000,
+  "distinct_valid_late_events": 0,
+  "late_threshold_minutes": 10,
+  "invalid_messages": 19,
+  "valid_messages": 3059,
+  "mongo_check": {
+    "valid_events_counted": 3000,
+    "expected_valid_minus_late": 3000,
+    "current_pairs_in_user_ratings": 3000,
+    "sum_unique_pairs_in_rating_stats": 3000,
+    "rejected_events_counted": 19,
+    "user_seen_pairs": 3000,
+    "no_loss_no_double_count": true,
+    "rejected_match": true
+  },
+  "kafka_offset_loss": {
+    "incidents": 0,
+    "lost_records": 0,
+    "by_partition": {},
+    "status": "no-gap-recorded"
+  },
+  "archive_check": {
+    "present": true,
+    "committed_batches": 20,
+    "committed_files": 57,
+    "uncommitted_files_on_disk": 0,
+    "rows": 3059,
+    "expected_rows_valid_messages": 3059,
+    "distinct_event_ids": 3000,
+    "expected_distinct_valid_events": 3000,
+    "exactly_once": true
+  },
+  "run_metadata": {
+    "commit_hash": null,
+    "working_tree_dirty": null,
+    "created_at_utc": "2026-11-21T10:14:53.366938+00:00",
+    "python_version": "3.11.18",
+    "configuration": {
+      "als_model_name": "als_implicit",
+      "als_min_rating": 4,
+      "fold_in_min_ratings": 1,
+      "fold_in_top_k": 100,
+      "fold_in_job_timeout_seconds": 120,
+      "fold_in_max_retries": 3,
+      "stream_trigger": "5 seconds",
+      "stream_watermark": "10 minutes",
+      "stream_max_offsets": 20000,
+      "kafka_log_retention_ms": 604800000
+    }
+  }
+}

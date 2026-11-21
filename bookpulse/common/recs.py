@@ -28,6 +28,9 @@ def split_train_test(ratings, test_ratio, seed, min_rating=ALS_MIN_RATING):
 
     Only positive ratings are training/evaluation signals. CSV rows are randomly held out per user;
     streamed ratings are newest and always stay in train. Parquet from an older clean.py has no from_stream.
+
+    Reproducible only over the full ratings table: cache the result before filtering by user_id, because
+    Spark pushes such a filter below the window and rand() then draws different values.
     """
     if "from_stream" not in ratings.columns:
         ratings = ratings.withColumn("from_stream", F.lit(False))

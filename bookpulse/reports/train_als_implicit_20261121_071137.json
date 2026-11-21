@@ -1,0 +1,99 @@
+{
+  "spark_master": "local[*]",
+  "implicit": true,
+  "min_rating": 4,
+  "model_version": "20261121_071127_693046",
+  "rows": {
+    "train": 3319021,
+    "test": 803090,
+    "streamed_in_train": 0
+  },
+  "grid": [
+    {
+      "rank": 20,
+      "regParam": 0.1,
+      "alpha": 1.0,
+      "validation_precision@10": 0.1394,
+      "validation_recall@10": 0.1192,
+      "seconds": 85.2
+    },
+    {
+      "rank": 20,
+      "regParam": 0.1,
+      "alpha": 10.0,
+      "validation_precision@10": 0.1208,
+      "validation_recall@10": 0.106,
+      "seconds": 68.4
+    },
+    {
+      "rank": 50,
+      "regParam": 0.1,
+      "alpha": 1.0,
+      "validation_precision@10": 0.1675,
+      "validation_recall@10": 0.144,
+      "seconds": 103.6
+    },
+    {
+      "rank": 50,
+      "regParam": 0.1,
+      "alpha": 10.0,
+      "validation_precision@10": 0.1379,
+      "validation_recall@10": 0.1219,
+      "seconds": 99.5
+    }
+  ],
+  "foldin_factor_consistency": {
+    "users_checked": 20,
+    "max_absolute_error": 2.26510883383213e-08
+  },
+  "best_params": {
+    "rank": 50,
+    "regParam": 0.1,
+    "alpha": 1.0,
+    "validation_precision@10": 0.1675,
+    "validation_recall@10": 0.144,
+    "seconds": 103.6
+  },
+  "rmse_test": {
+    "baseline_global_mean": 0.4997,
+    "baseline_item_mean": 0.4905
+  },
+  "ranking_test": {
+    "als": {
+      "precision@10": 0.248,
+      "recall@10": 0.1684,
+      "users_evaluated": 5000,
+      "distinct_books_recommended": 1472
+    },
+    "baseline_popular": {
+      "precision@10": 0.0743,
+      "recall@10": 0.0502,
+      "users_evaluated": 5000,
+      "distinct_books_recommended": 39
+    }
+  },
+  "fit_seconds": 433.1,
+  "total_seconds": 515.0,
+  "model_path": "/work/models/als_implicit/versions/20261121_071127_693046/spark_model",
+  "item_ids_path": "/work/models/als_implicit/versions/20261121_071127_693046/item_ids.npy",
+  "item_factors_path": "/work/models/als_implicit/versions/20261121_071127_693046/item_factors.npy",
+  "YtY_path": "/work/models/als_implicit/versions/20261121_071127_693046/YtY.npy",
+  "run_metadata": {
+    "commit_hash": null,
+    "working_tree_dirty": null,
+    "created_at_utc": "2026-11-21T07:11:37.910864+00:00",
+    "python_version": "3.11.18",
+    "configuration": {
+      "als_model_name": "als_implicit",
+      "als_min_rating": 4,
+      "fold_in_min_ratings": 1,
+      "fold_in_top_k": 100,
+      "fold_in_job_timeout_seconds": 120,
+      "fold_in_max_retries": 3,
+      "stream_trigger": "5 seconds",
+      "stream_watermark": "10 minutes",
+      "stream_max_offsets": 20000,
+      "kafka_log_retention_ms": 604800000
+    }
+  }
+}
