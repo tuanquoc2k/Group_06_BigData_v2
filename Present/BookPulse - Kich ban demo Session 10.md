@@ -76,7 +76,7 @@ Chỉ vào:
   - User 22: A Game of Thrones, The Shining, The Drawing of the Three, The Road, The Waste Lands, Dune, 11/22/63, Misery…
 
   Không nói là ba thể loại tách bạch: Animal Farm có trong cả danh sách user 1 và 2 (mô hình hơi nghiêng về sách nổi tiếng).
-- Nói lý do chọn implicit, chỉ học rating từ 4 sao: Precision@10 0,248, NDCG@10 0,293, so với sách phổ biến 0,074 / 0,091 và ALS explicit 0,018 / 0,019 (slide 10). Explicit học trên mọi rating, đoán sao tốt hơn baseline (RMSE 0,754 so với 0,799) nhưng chỉ 670/5.000 user có ít nhất một cuốn trúng. Nếu bị hỏi: mô hình phục vụ fit trên tập train (80% rating thích của mỗi người).
+- Nói lý do chọn implicit, chỉ học rating từ 4 sao: Precision@10 0,248, NDCG@10 0,293, so với sách phổ biến 0,074 / 0,091 và ALS explicit 0,018 / 0,019 (slide 11). Explicit học trên mọi rating, đoán sao tốt hơn baseline (RMSE 0,754 so với 0,799) nhưng chỉ 670/5.000 user có ít nhất một cuốn trúng. Nếu bị hỏi: mô hình phục vụ fit trên tập train (80% rating thích của mỗi người).
 - MongoDB (khoảng 3 giây):
 
 ```bash
@@ -125,7 +125,7 @@ Sau khoảng 5–9 giây (đo 21/11: 5,0, 8,0 và 9,1 giây; trong đó worker c
 
 Nói: "App chỉ gửi sự kiện vào Kafka. Streaming ghi rating vào `user_ratings`, đánh dấu sách đã xem và tạo một job; worker lấy job, tính lại vector gu của user 1 từ lịch sử thích cộng rating mới, trên vector sách cố định của lần train gần nhất, rồi ghi danh sách mới vào `recs_live`. Đây là suy luận, không phải train lại: phép tính mất khoảng 4 mili giây, và vector khớp đúng vector mà Spark ALS tính khi train (sai số cỡ 10⁻⁸)."
 
-Nếu được hỏi "nhiều người chấm cùng lúc thì sao": 100 người chấm cùng lúc, trung vị từ lúc gửi tới khi có gợi ý mới là 8,6–21,8 giây qua hai lần đo (`reports/stream_latency_20261121_073152.json`, `_073528.json`), vì một worker xử lý lần lượt và lần sau job vừa khởi động; production sẽ chạy nhiều worker chia theo user_id (slide 18).
+Nếu được hỏi "nhiều người chấm cùng lúc thì sao": 100 người chấm cùng lúc, trung vị từ lúc gửi tới khi có gợi ý mới là 8,6–21,8 giây qua hai lần đo (`reports/stream_latency_20261121_073152.json`, `_073528.json`), vì một worker xử lý lần lượt và lần sau job vừa khởi động; production sẽ chạy nhiều worker chia theo user_id (slide 19).
 
 Dự phòng nếu trình duyệt có vấn đề: cùng việc đó bằng dòng lệnh (cuốn đầu danh sách), rồi xem `recs_live`:
 

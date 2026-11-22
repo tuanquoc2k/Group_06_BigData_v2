@@ -4,7 +4,7 @@ Toàn bộ hệ thống chạy bằng Docker trên một máy: Spark (batch + St
 thành phần MapReduce chạy trên một cụm Hadoop riêng (HDFS + YARN), là nhánh kiểm chứng, xem mục 8. Hệ thống tổ chức
 theo ý tưởng Lambda: lớp batch, lớp tốc độ, lớp phục vụ; app đọc `recs_live` trước, nếu không có thì dùng batch view,
 đồng thời lọc sách trong `user_seen` và `user_ratings` sau khi trạng thái tới MongoDB. Sơ đồ tổng quan hiện tại [docs/img/architecture_overview.png](docs/img/architecture_overview.png)
-(slide 4), chi tiết [docs/img/architecture_detail.png](docs/img/architecture_detail.png) (slide 5) và bản
+(slide 5), chi tiết [docs/img/architecture_detail.png](docs/img/architecture_detail.png) (slide 6) và bản
 tương tác [docs/kien-truc.html](docs/kien-truc.html).
 
 ```
@@ -198,7 +198,7 @@ score = Y @ x_u
 `YtY` được xuất một lần từ toàn bộ `itemFactors`; phép giải dùng NumPy `float64`, không dùng nghịch đảo.
 Rating thấp không ảnh hưởng vector nhưng mọi sách đã chấm đều bị loại khỏi top-k. Sách không có trong itemFactors
 bị bỏ qua và ghi log. Nếu có ít hơn `FOLD_IN_MIN_RATINGS` positive rating mới từ stream kể từ snapshot gần nhất
-(mặc định 3), worker giữ
+(mặc định 1), worker giữ
 gợi ý batch thay vì giải vector ALS. Alpha, rank, regParam, threshold và model version được kiểm tra từ manifest;
 `FOLD_IN_MIN_RATINGS` và `FOLD_IN_TOP_K` cấu hình qua biến môi trường (mặc định 1 và 100). Sidebar cho phép nhập
 user ID, và trạng thái fold-in hiển thị thanh tiến độ theo pha cùng thời gian thực đã trôi qua.
@@ -483,8 +483,11 @@ Goodbooks-10k không có dòng trùng (xem `clean_*.json`), nên kết quả b�
 
 ```bash
 python -m unittest tests.test_mapreduce -v                                  # không cần Spark/Hadoop
-docker compose exec spark python -m unittest discover -s tests -t . -v      # tất cả, gồm phần cần Spark
+docker compose exec spark pytest -q                                         # tất cả (55 test, 21/11: 55/55 đạt)
 ```
+
+Các test khác cần `pyspark`, `pymongo`, `numpy` đúng phiên bản trong image, nên chạy trong container `spark`;
+chạy `pytest` trực tiếp trên máy host sẽ báo lỗi thiếu module.
 
 | File | Kiểm tra |
 |---|---|
@@ -502,9 +505,13 @@ Ngoài unit test, mỗi thành phần có kiểm chứng trên dữ liệu thậ
 `write_recs.py` được thử trên database riêng: `docker compose exec -e MONGO_DB=bookpulse_test spark python
 batch/write_recs.py --books data/goodbooks/books.csv` (`reports/superseded/write_recs_gate_test_20261108/`).
 
-Các phép thử fault dưới đây là số đo lưu từ lần chạy trước, không xác nhận cấu hình hiện tại; các phần kiểm tra
-`rating_stats` cũ không nhất thiết khớp semantics hiện hành. Không chạy lại các script reset nếu không chủ định xóa
-trạng thái streaming.
+Cả hai phép thử dưới đây đã chạy lại trên bản hiện tại ngày 21/11. kill -9 (`reports/kafka_audit_20261121_073115.json`,
+log `reports/streaming/fault_test_20261121_142753/`): 1.474 = 1.500 − 26 trễ, 1.474 cặp trong `user_ratings` = tổng
+`rating_stats`, 15 lỗi, kho 1.532 dòng = 1.532 message hợp lệ, 1.500 `event_id`, `exactly_once` = `true`. Ngắt Kafka 44 giây
+và MongoDB 31 giây (`reports/kafka_audit_20261121_101453.json`, `reports/streaming/outage_test_20261121_171048/events.log`):
+job #1 chạy qua cả hai lần ngắt, không phải khởi động lại; 3.078 message, 3.000 = 3.000, 19 lỗi, kho 3.059 = 3.059; 0 mất,
+0 trùng. Các lần chạy 08/11 bên dưới là của bản trước (khi đó còn query trending và cửa sổ thời gian). Không chạy lại
+các script reset nếu không chủ định xóa trạng thái streaming.
 
 Thử sự cố streaming (khoảng 3 phút, chạy từ `bookpulse/`): `bash scripts/stream_fault_test.sh`. Script reset streaming,
 chạy job + producer (1.500 sự kiện, 3% trễ sau 30 giây, seed 7), `kill -9` cả Python lẫn JVM sau 45 giây, 15 giây sau
