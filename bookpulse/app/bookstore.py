@@ -5,7 +5,7 @@ import os
 import secrets
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
@@ -427,17 +427,10 @@ def card_grid(books, key_prefix, user_id):
             return
 
     if progress_count < FOLD_IN_MIN_RATINGS and (progress_count or pending_events):
-        st.info(
-            f"Đã chấm {progress_count}/{FOLD_IN_MIN_RATINGS} sách khác nhau từ "
-            f"{ALS_MIN_RATING} sao kể từ lần fold-in gần nhất. Có thể tiếp tục chấm sách; "
-            "ALS chưa chạy."
-        )
+        st.info(f"Fold-in {progress_count}/{FOLD_IN_MIN_RATINGS} · chấm thêm sách từ {ALS_MIN_RATING}★.")
     elif refresh_after_update:
         next_count = streamed_positive_ratings_since_snapshot(user_id)
-        st.caption(
-            f"ALS fold-in đã cập nhật gợi ý. Tiến độ lần tiếp theo: "
-            f"{next_count}/{FOLD_IN_MIN_RATINGS}."
-        )
+        st.caption(f"Đã cập nhật gợi ý · lần tiếp theo {next_count}/{FOLD_IN_MIN_RATINGS}.")
 
     result = st.session_state.pop("last_rating_result", None)
     if result:
@@ -637,7 +630,6 @@ if "recommendation_page" not in st.session_state:
 
 with st.sidebar:
     st.markdown("## 📚 BookPulse")
-    st.caption("Chọn một hồ sơ để xem gợi ý batch và cập nhật streaming.")
     st.number_input("Mã người đọc", min_value=1, step=1, key="selected_user_id", on_change=on_user_id_changed)
     user_id = int(st.session_state["selected_user_id"])
     if st.button("Tạo hồ sơ khách mới", use_container_width=True):
@@ -784,15 +776,9 @@ st.markdown("""
 </section>
 """, unsafe_allow_html=True)
 toolbar, refresh_column = st.columns([5, 1])
-if stream_positive_count < FOLD_IN_MIN_RATINGS:
-    toolbar.caption(
-        f"Hồ sơ #{user_id} · tiến độ fold-in: {stream_positive_count}/{FOLD_IN_MIN_RATINGS} "
-        f"sách mới đã chấm từ {ALS_MIN_RATING} sao kể từ lần cập nhật gần nhất."
-    )
-else:
-    toolbar.caption(
-        f"Hồ sơ #{user_id} · đã đủ {FOLD_IN_MIN_RATINGS} rating từ {ALS_MIN_RATING} sao để chạy ALS fold-in."
-    )
+toolbar.caption(
+    f"Hồ sơ #{user_id} · fold-in {min(stream_positive_count, FOLD_IN_MIN_RATINGS)}/{FOLD_IN_MIN_RATINGS}"
+)
 if refresh_column.button("Làm mới", use_container_width=True):
     st.rerun()
 
@@ -803,39 +789,29 @@ view = st.radio(
 
 if view == "Gợi ý cho bạn":
     st.subheader("Gợi ý dành riêng cho bạn")
-    st.caption(recommendation_source + (f" · {hidden} sách đã xem được ẩn" if hidden else "")
-               + (f" · bổ sung {filled} sách phổ biến" if filled else ""))
+    details = [recommendation_source, f"{len(recommendations[:TOP_K])} gợi ý"]
+    if filled:
+        details.append(f"{filled} sách phổ biến bổ sung")
     if recommendation_updated_at:
         updated = recommendation_updated_at
         if updated.tzinfo is None:
             updated = updated.replace(tzinfo=timezone.utc)
-        st.caption(f"Danh sách hiện tại · cập nhật {updated.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        details.append(f"cập nhật {updated.astimezone(timezone(timedelta(hours=7))).strftime('%H:%M %d/%m/%Y')}")
+    st.caption(" · ".join(details))
     if latest_job and latest_job.get("status") == "failed":
         st.error("Lần cập nhật gần nhất thất bại. Kiểm tra log recommendation-worker.")
     elif live_doc and live_doc.get("source") == "als-foldin":
-        st.success("Gợi ý fold-in mới nhất đã sẵn sàng.")
+        st.success("Đã cập nhật gợi ý theo lượt chấm mới nhất (ALS fold-in).")
     elif stream_positive_count < FOLD_IN_MIN_RATINGS:
-        st.info(
-            f"Chấm {FOLD_IN_MIN_RATINGS - stream_positive_count} sách nữa từ {ALS_MIN_RATING} sao "
-            "để kích hoạt ALS fold-in."
-        )
-    elif live_doc:
-        st.info("Chưa tạo được vector ALS hợp lệ; hiện vẫn dùng gợi ý batch.")
-    elif latest_job and latest_job.get("status") == "done" and not latest_job.get("recommendations_written"):
-        st.info("Sự kiện đã xử lý; chưa có vector cá nhân hợp lệ nên đang dùng danh sách batch.")
-    else:
-        st.info("Danh sách này lấy từ model batch. Gửi sự kiện mô phỏng ở trang Điều khiển demo để xem cập nhật streaming.")
-    st.caption(f"Tổng cộng {len(recommendations[:TOP_K])} gợi ý cho người đọc #{user_id}.")
+        st.info(f"Chấm từ {ALS_MIN_RATING}★ để cập nhật gợi ý · dưới {ALS_MIN_RATING}★ chỉ ẩn sách đã xem.")
+    elif live_doc or (latest_job and latest_job.get("status") == "done"
+                      and not latest_job.get("recommendations_written")):
+        st.info("Chưa tính được gu cá nhân, đang dùng gợi ý batch.")
     rec_books = [
         {**by_id[rec["book_id"]], "user_rating": ratings_by_book.get(rec["book_id"]),
          "score": rec.get("score")}
         for rec in recommendations[:TOP_K] if rec["book_id"] in by_id
     ]
-    st.caption(
-        f"Chấm {FOLD_IN_MIN_RATINGS} sách mới từ {ALS_MIN_RATING} sao kể từ lần cập nhật gần nhất "
-        "để kích hoạt fold-in. "
-        f"Rating dưới {ALS_MIN_RATING} sao chỉ ghi nhận sách đã xem."
-    )
     card_grid(rec_books, "personal", user_id)
 
 elif view == "Khám phá sách":

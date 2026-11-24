@@ -45,16 +45,23 @@ def reset_args(params):
     return [PY, "scripts/reset_streaming.py", "--yes"]
 
 
+def late_args(params):
+    limit, rate = num(params, "limit", 900, 50, 5000), num(params, "rate", 20, 5, 100)
+    # producer.py sends late events only after Spark has a watermark (default 30 s); a 300-event run at 20/s
+    # lasts 15 s and would send none, so start them halfway through the run (at least 8 s: one 5 s trigger + slack)
+    late_after = max(8.0, min(30.0, int(limit) / int(rate) / 2))
+    return [PY, "streaming/producer.py", "--file", str(FAKE_CSV), "--limit", limit, "--rate", rate,
+            "--late", num(params, "late", 0.05, 0.01, 0.5, float), "--late-after-seconds", f"{late_after:g}",
+            "--seed", num(params, "seed", random.randrange(10**6), 0, 10**9)]
+
+
 # name -> function(params) -> argv. Nothing outside this table can be run.
 ACTIONS = {
     "start_stream": lambda p: [PY, STREAM_JOB],
     "reset": reset_args,
     "rate_recs": lambda p: [PY, "scripts/rate_from_recs.py", "--user", num(p, "user", 1, 1, 10**7),
                             "--n", num(p, "n", 2, 1, 10), "--rating", num(p, "rating", 5, 1, 5)],
-    "late": lambda p: [PY, "streaming/producer.py", "--file", str(FAKE_CSV),
-                       "--limit", num(p, "limit", 900, 50, 5000), "--rate", num(p, "rate", 20, 5, 100),
-                       "--late", num(p, "late", 0.05, 0.01, 0.5, float),
-                       "--seed", num(p, "seed", random.randrange(10**6), 0, 10**9)],
+    "late": late_args,
     "kafka_audit": lambda p: [PY, "scripts/kafka_audit.py"],
     "nosql_evidence": lambda p: [PY, "scripts/nosql_evidence.py"],
     # the whole loop stream archive -> clean -> train ALS -> write_recs -> stream job back (about 3 minutes on 12 cores, 6-8 on 4)
